@@ -4,7 +4,7 @@ extern crate std;
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicBool, Ordering::*};
 #[cfg(feature = "std")]
-use std::sync::{atomic::AtomicU8, Condvar, Mutex};
+use std::sync::{Condvar, Mutex, atomic::AtomicU8};
 
 /// # Safety
 ///

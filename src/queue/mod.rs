@@ -9,7 +9,7 @@ use core::{
     sync::atomic::{AtomicPtr, Ordering::*},
 };
 
-use crate::sync::{mutex::Mutex, parker::Parker, DefaultSyncPrimitives, SyncPrimitives};
+use crate::sync::{DefaultSyncPrimitives, SyncPrimitives, mutex::Mutex, parker::Parker};
 
 mod drain;
 mod node;

@@ -1,9 +1,9 @@
 use core::{pin::Pin, ptr::NonNull, sync::atomic::Ordering::*};
 
 use crate::{
+    Queue,
     queue::{LockedQueue, NodeLink},
     sync::SyncPrimitives,
-    Queue,
 };
 
 pub struct Drain<'a, T, S: SyncPrimitives + 'a> {

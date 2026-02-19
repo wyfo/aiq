@@ -19,7 +19,7 @@ use crate::queue::state::*;
 use crate::unsafe_pinned::UnsafePinned;
 use crate::{
     queue::{LockedQueue, Queue},
-    sync::{parker::Parker, DefaultSyncPrimitives, SyncPrimitives},
+    sync::{DefaultSyncPrimitives, SyncPrimitives, parker::Parker},
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
