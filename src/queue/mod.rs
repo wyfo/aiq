@@ -2,13 +2,14 @@ use core::{
     cell::Cell,
     mem,
     mem::ManuallyDrop,
-    ops::{Deref, Not},
+    ops::{Deref, DerefMut, Not},
+    pin::Pin,
     ptr,
     ptr::NonNull,
     sync::atomic::{AtomicPtr, Ordering::*},
 };
 
-use crate::sync::{mutex::Mutex, DefaultSyncPrimitives, SyncPrimitives};
+use crate::sync::{mutex::Mutex, parker::Parker, DefaultSyncPrimitives, SyncPrimitives};
 
 mod drain;
 mod node;
@@ -50,13 +51,16 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     #[cfg(feature = "queue-state")]
     #[inline]
     pub fn with_state(state: QueueState) -> Self {
-        Self::new_impl(state_to_ptr(state))
+        Self::new_impl(StateOrTail::State(state).into())
     }
 
     #[cfg(feature = "queue-state")]
     #[inline]
     pub fn state(&self) -> Option<usize> {
-        ptr_to_state(self.tail.load(SeqCst))
+        match self.tail.load(SeqCst).into() {
+            StateOrTail::State(state) => Some(state),
+            _ => None,
+        }
     }
 
     #[inline]
@@ -70,8 +74,9 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     #[cfg(feature = "queue-state")]
     pub fn fetch_update_state<F: FnMut(QueueState) -> QueueState>(&self, mut f: F) -> bool {
         let mut tail = self.tail.load(Relaxed);
-        while let Some(state) = ptr_to_state(tail) {
-            match (self.tail).compare_exchange(tail, state_to_ptr(f(state)), SeqCst, Acquire) {
+        while let StateOrTail::State(state) = tail.into() {
+            let new = StateOrTail::State(f(state)).into();
+            match self.tail.compare_exchange(tail, new, SeqCst, Acquire) {
                 Ok(_) => return true,
                 Err(ptr) => tail = ptr,
             }
@@ -83,7 +88,6 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     pub fn lock(&self) -> LockedQueue<'_, T, S> {
         LockedQueue {
             queue: self,
-            head: self.head.get(),
             guard: ManuallyDrop::new(self.mutex.lock()),
         }
     }
@@ -105,14 +109,35 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         self.fetch_update_state(&mut f).not().then_some(lock)
     }
 
-    unsafe fn enqueue(&self, node: &NodeLink<S>) -> bool {
-        let _ = node;
-        todo!()
-    }
-
-    unsafe fn remove(&self, node: &NodeLink<S>) {
-        let _ = node;
-        todo!()
+    unsafe fn enqueue(
+        &self,
+        node: NonNull<NodeLink<S>>,
+        mut new_tail: impl FnMut(*mut NodeLink<S>) -> (*mut NodeLink<S>, Option<*mut NodeLink<S>>),
+    ) -> bool {
+        let mut tail = self.tail.load(Relaxed);
+        let prev = loop {
+            let (new_tail, prev) = new_tail(tail);
+            let prev =
+                prev.map(|p| NonNull::new(p).unwrap_or_else(|| NonNull::from(&self.head_sentinel)));
+            if let Some(prev) = prev {
+                unsafe { node.as_ref() }.prev.set(prev);
+            }
+            match (self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Relaxed) {
+                Ok(_) if prev.is_none() => return false,
+                Ok(_) => break unsafe { prev.unwrap().as_ref() },
+                Err(ptr) => tail = ptr,
+            }
+        };
+        (unsafe { node.as_ref() }.state).store(NodeLinkState::Queued as _, Relaxed);
+        prev.next.store(node.as_ptr(), SeqCst);
+        if prev.state() == NodeLinkState::Parked {
+            #[cold]
+            fn unpark<S: SyncPrimitives>(prev: &NodeLink<S>) {
+                prev.parker.unpark();
+            }
+            unpark(prev);
+        }
+        true
     }
 }
 
@@ -122,41 +147,65 @@ impl<T, S: SyncPrimitives> Default for Queue<T, S> {
     }
 }
 
+impl<T, S: SyncPrimitives> AsRef<Self> for Queue<T, S> {
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
 pub struct LockedQueue<'a, T, S: SyncPrimitives> {
     queue: &'a Queue<T, S>,
-    head: Option<NonNull<NodeWithData<T, S>>>,
     guard: ManuallyDrop<MutexGuard<'a, S>>,
 }
 
 impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
-    pub fn dequeue(&mut self) -> Option<Dequeue<'_, T, S>> {
-        todo!()
+    pub fn dequeue(&mut self) -> Option<NodeDequeuing<'a, '_, T, S>> {
+        let tail = || NonNull::new(self.queue.tail.load(SeqCst));
+        let node = self.queue.head_sentinel.find_next(tail)?.cast();
+        Some(NodeDequeuing { node, locked: self })
     }
 
-    pub fn pop(&mut self) -> Option<Pop<'_, T, S>> {
-        todo!()
+    pub fn pop(&mut self) -> Option<NodeDequeuing<'a, '_, T, S>> {
+        let node = NonNull::new(self.queue.tail.load(SeqCst))?.cast();
+        Some(NodeDequeuing { node, locked: self })
     }
 
     pub fn drain(self) -> Drain<'a, T, S> {
-        todo!()
+        Drain::new(self)
+    }
+
+    unsafe fn remove(
+        &mut self,
+        node: &NodeLink<S>,
+        reset_tail: impl FnOnce() -> *mut NodeLink<S>,
+    ) -> bool {
+        if let Some(next) = NonNull::new(node.next.load(Relaxed)) {
+            return node.unlink(Some(next));
+        }
+        node.prev().wait_for_next(Some(NodeLinkState::Queued));
+        node.prev().next.store(ptr::null_mut(), Relaxed);
+        let node_ptr = ptr::from_ref(node).cast_mut();
+        match (self.queue.tail).compare_exchange(node_ptr, reset_tail(), SeqCst, Relaxed) {
+            Ok(_) => node.unlink(None),
+            Err(_) => node.unlink(Some(node.wait_for_next(None))),
+        }
     }
 }
 
 impl<T, S: SyncPrimitives> Drop for LockedQueue<'_, T, S> {
     fn drop(&mut self) {
-        self.queue.head.set(self.head);
         unsafe { self.queue.mutex.unlock(ManuallyDrop::take(&mut self.guard)) };
     }
 }
 
-pub struct Dequeue<'a, T, S: SyncPrimitives> {
-    head: NonNull<NodeWithData<T, S>>,
-    _guard: &'a mut LockedQueue<'a, T, S>,
+pub struct NodeDequeuing<'locked, 'a, T, S: SyncPrimitives> {
+    node: NonNull<NodeWithData<T, S>>,
+    locked: &'a mut LockedQueue<'locked, T, S>,
 }
 
-impl<T, S: SyncPrimitives> Dequeue<'_, T, S> {
+impl<T, S: SyncPrimitives> NodeDequeuing<'_, '_, T, S> {
     pub fn data(&self) -> *mut T {
-        unsafe { &raw mut (*self.head.as_ptr()).data }
+        unsafe { &raw mut (*self.node.as_ptr()).data }
     }
 
     pub fn requeue(self) {
@@ -164,55 +213,18 @@ impl<T, S: SyncPrimitives> Dequeue<'_, T, S> {
     }
 
     #[cfg(feature = "queue-state")]
-    pub fn set_queue_state<F>(self, state: F) -> bool {
-        todo!()
+    pub fn try_set_queue_state<F: FnOnce() -> QueueState>(self, state: F) -> bool {
+        let node = unsafe { self.node.cast::<NodeLink<S>>().as_ref() };
+        let reset_tail = || StateOrTail::State(state()).into();
+        unsafe { self.locked.remove(node, reset_tail) }
     }
 }
 
-impl<T, S: SyncPrimitives> Drop for Dequeue<'_, T, S> {
+impl<T, S: SyncPrimitives> Drop for NodeDequeuing<'_, '_, T, S> {
     fn drop(&mut self) {
-        todo!()
+        let node = unsafe { self.node.cast::<NodeLink<S>>().as_ref() };
+        unsafe { self.locked.remove(node, ptr::null_mut) };
     }
 }
 
-impl<T: Sync, S: SyncPrimitives> Deref for Dequeue<'_, T, S> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &unsafe { self.head.as_ref() }.data
-    }
-}
-
-pub struct Pop<'a, T, S: SyncPrimitives> {
-    head: NonNull<NodeWithData<T, S>>,
-    _guard: &'a mut LockedQueue<'a, T, S>,
-}
-
-impl<T, S: SyncPrimitives> Pop<'_, T, S> {
-    pub fn data(&self) -> *mut T {
-        unsafe { &raw mut (*self.head.as_ptr()).data }
-    }
-
-    pub fn requeue(self) {
-        mem::forget(self);
-    }
-
-    #[cfg(feature = "queue-state")]
-    pub fn set_queue_state<F>(self, state: F) -> bool {
-        todo!()
-    }
-}
-
-impl<T, S: SyncPrimitives> Drop for Pop<'_, T, S> {
-    fn drop(&mut self) {
-        todo!()
-    }
-}
-
-impl<T: Sync, S: SyncPrimitives> Deref for Pop<'_, T, S> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &unsafe { self.head.as_ref() }.data
-    }
-}
+node_data!(NodeDequeuing, '_);
