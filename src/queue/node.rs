@@ -1,10 +1,10 @@
-#[cfg(feature = "nightly")]
+#[cfg(nightly)]
 use core::pin::UnsafePinned;
 use core::{
     cell::Cell,
     hint,
     hint::unreachable_unchecked,
-    marker::{PhantomData, PhantomPinned},
+    marker::PhantomData,
     mem,
     ops::{Deref, DerefMut},
     pin::Pin,
@@ -15,7 +15,7 @@ use core::{
 
 #[cfg(feature = "queue-state")]
 use crate::queue::state::*;
-#[cfg(not(feature = "nightly"))]
+#[cfg(not(nightly))]
 use crate::unsafe_pinned::UnsafePinned;
 use crate::{
     queue::{LockedQueue, Queue},
@@ -125,14 +125,10 @@ impl<S: SyncPrimitives> NodeLink<S> {
         }
     }
 
-    pub(super) fn unlink(&self, next: Option<NonNull<NodeLink<S>>>) -> bool {
-        if let Some(next) = next {
-            unsafe { next.as_ref() }.prev.set(self.prev.get());
-        }
-        let next_ptr = next.map_or(ptr::null_mut(), NonNull::as_ptr);
-        self.prev().next.store(next_ptr, Relaxed);
+    pub(super) fn unlink(&self, next: NonNull<NodeLink<S>>) {
+        unsafe { next.as_ref() }.prev.set(self.prev.get());
+        self.prev().next.store(next.as_ptr(), Relaxed);
         self.state.store(NodeLinkState::Dequeued as _, Release);
-        next.is_none()
     }
 }
 
@@ -171,8 +167,10 @@ pub enum NodeState<'a, T, S: SyncPrimitives> {
 pub struct Node<Q: AsRef<Queue<T, S>>, T, S: SyncPrimitives = DefaultSyncPrimitives> {
     queue: Q,
     node: UnsafePinned<NodeWithData<T, S>>,
-    _pinned: PhantomPinned,
 }
+
+unsafe impl<Q: AsRef<Queue<T, S>>, T: Send, S: SyncPrimitives> Send for Node<Q, T, S> {}
+unsafe impl<Q: AsRef<Queue<T, S>>, T: Sync, S: SyncPrimitives> Sync for Node<Q, T, S> {}
 
 impl<Q: AsRef<Queue<T, S>>, T, S: SyncPrimitives> Node<Q, T, S> {
     pub const fn new(queue: Q, data: T) -> Self {
@@ -182,7 +180,6 @@ impl<Q: AsRef<Queue<T, S>>, T, S: SyncPrimitives> Node<Q, T, S> {
                 link: NodeLink::new(),
                 data,
             }),
-            _pinned: PhantomPinned,
         }
     }
 
@@ -195,12 +192,12 @@ impl<Q: AsRef<Queue<T, S>>, T, S: SyncPrimitives> Node<Q, T, S> {
     }
 
     pub fn state(self: Pin<&mut Self>) -> NodeState<'_, T, S> {
-        unsafe { self.get_unchecked_mut().state_impl() }
+        unsafe { self.get_unchecked_mut().state_impl().0 }
     }
 
-    fn state_impl(&mut self) -> NodeState<'_, T, S> {
-        let node = unsafe { NonNull::new_unchecked(&mut *self.node.get()) };
-        match self.raw_state() {
+    fn state_impl(&self) -> (NodeState<'_, T, S>, &Q) {
+        let node = NonNull::from(&self.node);
+        let state = match self.raw_state() {
             RawNodeState::Unqueued => NodeState::Unqueued(NodeUnqueued {
                 node,
                 queue: self.queue.as_ref(),
@@ -220,55 +217,76 @@ impl<Q: AsRef<Queue<T, S>>, T, S: SyncPrimitives> Node<Q, T, S> {
                 node,
                 _queue: PhantomData,
             }),
-        }
+        };
+        (state, &self.queue)
+    }
+
+    pub fn state_and_queue(self: Pin<&mut Self>) -> (NodeState<'_, T, S>, &Q) {
+        unsafe { self.get_unchecked_mut().state_impl() }
     }
 }
 
 impl<Q: AsRef<Queue<T, S>>, T, S: SyncPrimitives> Drop for Node<Q, T, S> {
     fn drop(&mut self) {
-        if let NodeState::Queued(queued) = self.state_impl() {
+        if let NodeState::Queued(queued) = self.state_impl().0 {
             queued.dequeue()
         }
     }
 }
 
 macro_rules! node_data {
-    ($node:ident $(, $lf:lifetime)?) => {
-        impl<T, S: SyncPrimitives> $node<'_, $($lf,)? T, S> {
+    ($node:ident) => {
+        impl<T, S: SyncPrimitives> $node<'_, T, S> {
+            #[allow(dead_code)]
+            fn link(&self) -> NonNull<NodeLink<S>> {
+                NonNull::new(UnsafePinned::raw_get(self.node.as_ptr()))
+                    .unwrap()
+                    .cast()
+            }
+
+            #[allow(clippy::mut_from_ref)]
+            fn data_pinned_const(&self) -> Pin<&mut T> {
+                unsafe {
+                    Pin::new_unchecked(&mut (*UnsafePinned::raw_get(self.node.as_ptr())).data)
+                }
+            }
+
             pub fn data_pinned(&mut self) -> Pin<&mut T> {
-                unsafe { Pin::new_unchecked(&mut self.node.as_mut().data) }
+                self.data_pinned_const()
             }
         }
 
-        impl<T, S: SyncPrimitives> Deref for $node<'_, $($lf,)? T, S> {
+        impl<T, S: SyncPrimitives> Deref for $node<'_, T, S> {
             type Target = T;
 
             fn deref(&self) -> &Self::Target {
-                unsafe { &self.node.as_ref().data }
+                unsafe { &(*UnsafePinned::raw_get(self.node.as_ptr())).data }
             }
         }
 
-        impl<T: Unpin, S: SyncPrimitives> DerefMut for $node<'_, $($lf,)? T, S> {
+        impl<T: Unpin, S: SyncPrimitives> DerefMut for $node<'_, T, S> {
             fn deref_mut(&mut self) -> &mut Self::Target {
-                unsafe { &mut self.node.as_mut().data }
+                unsafe { &mut (*UnsafePinned::raw_get(self.node.as_ptr())).data }
             }
         }
     };
 }
-pub(crate) use node_data;
 
 pub struct NodeUnqueued<'a, T, S: SyncPrimitives> {
-    node: NonNull<NodeWithData<T, S>>,
+    node: NonNull<UnsafePinned<NodeWithData<T, S>>>,
     queue: &'a Queue<T, S>,
 }
 
 impl<'a, T, S: SyncPrimitives> NodeUnqueued<'a, T, S> {
     #[inline]
-    pub fn enqueue<I: FnOnce(Pin<&mut T>)>(mut self: Pin<&mut Self>, init: I) {
+    pub fn enqueue<I: FnOnce(Pin<&mut T>)>(&mut self, init: I) {
         init(self.data_pinned());
-        let node = self.node.cast();
-        let new_tail = |tail| (node.as_ptr(), Some(tail));
-        unsafe { self.queue.as_ref().enqueue(node, new_tail) };
+        // let node = self.link();
+        #[cfg(feature = "queue-state")]
+        let new_tail = |tail| (StateOrTail::Tail(self.node.cast()).into(), Some(tail));
+        #[cfg(not(feature = "queue-state"))]
+        let new_tail = |tail| (self.node.as_ptr().cast(), Some(tail));
+        unsafe { self.queue.as_ref().enqueue(self.link(), new_tail) };
     }
 
     #[cfg(feature = "queue-state")]
@@ -277,52 +295,56 @@ impl<'a, T, S: SyncPrimitives> NodeUnqueued<'a, T, S> {
         F: FnMut(QueueState) -> Option<QueueState>,
         I: FnMut(Option<QueueState>, Pin<&mut T>),
     >(
-        self: Pin<&mut Self>,
+        &mut self,
         mut f: F,
         mut init: I,
     ) -> bool {
-        let node = self.node.cast();
-        let data = || unsafe { Pin::new_unchecked(&mut (*self.node.as_ptr()).data) };
         let new_tail = |tail| match StateOrTail::from(tail) {
             StateOrTail::State(state) => match f(state) {
                 Some(new_state) => (StateOrTail::State(new_state).into(), None),
                 None => {
-                    init(Some(state), data());
-                    (node.as_ptr(), Some(ptr::null_mut()))
+                    init(Some(state), self.data_pinned_const());
+                    (
+                        StateOrTail::Tail(self.node.cast()).into(),
+                        Some(ptr::null_mut()),
+                    )
                 }
             },
             StateOrTail::Tail(tail) => {
-                init(None, data());
-                (node.as_ptr(), Some(tail.as_ptr()))
+                init(None, self.data_pinned_const());
+                (
+                    StateOrTail::Tail(self.node.cast()).into(),
+                    Some(tail.as_ptr()),
+                )
             }
         };
-        !unsafe { self.queue.as_ref().enqueue(node, new_tail) }
+        !unsafe { self.queue.as_ref().enqueue(self.link(), new_tail) }
     }
 }
 
 node_data!(NodeUnqueued);
 
 pub struct NodeQueued<'a, T, S: SyncPrimitives> {
-    node: NonNull<NodeWithData<T, S>>,
+    node: NonNull<UnsafePinned<NodeWithData<T, S>>>,
     locked: LockedQueue<'a, T, S>,
 }
 
 impl<T, S: SyncPrimitives> NodeQueued<'_, T, S> {
     pub fn dequeue(mut self) {
-        unsafe { self.locked.remove(&self.node.as_ref().link, ptr::null_mut) };
+        unsafe { self.locked.remove(self.link().as_ref(), ptr::null_mut) };
     }
 
     #[cfg(feature = "queue-state")]
     pub fn dequeue_and_try_set_queue_state<F: FnOnce() -> QueueState>(mut self, state: F) -> bool {
         let reset_tail = || StateOrTail::State(state()).into();
-        unsafe { self.locked.remove(&self.node.as_ref().link, reset_tail) }
+        unsafe { self.locked.remove(self.link().as_ref(), reset_tail) }
     }
 }
 
 node_data!(NodeQueued);
 
 pub struct NodeDequeued<'a, T, S: SyncPrimitives> {
-    node: NonNull<NodeWithData<T, S>>,
+    node: NonNull<UnsafePinned<NodeWithData<T, S>>>,
     _queue: PhantomData<&'a Queue<T, S>>,
 }
 

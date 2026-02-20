@@ -8,9 +8,22 @@ pub(super) const STATE_SHIFT: usize = 1;
 pub type QueueState = usize;
 pub const INTRUSIVE_QUEUE_MAX_STATE: QueueState = usize::MAX >> STATE_SHIFT;
 
+#[derive(Debug)]
 pub(super) enum StateOrTail<S: SyncPrimitives> {
     State(QueueState),
     Tail(NonNull<NodeLink<S>>),
+}
+
+pub(super) const fn state_to_ptr<S: SyncPrimitives>(state: QueueState) -> *mut NodeLink<S> {
+    #[cold]
+    #[inline(never)]
+    const fn panic_queue_state_overflow() -> ! {
+        panic!("queue state overflow")
+    }
+    if state > usize::MAX >> STATE_SHIFT {
+        panic_queue_state_overflow()
+    }
+    ptr::without_provenance_mut(state << STATE_SHIFT)
 }
 
 impl<S: SyncPrimitives> From<*mut NodeLink<S>> for StateOrTail<S> {
@@ -24,21 +37,12 @@ impl<S: SyncPrimitives> From<*mut NodeLink<S>> for StateOrTail<S> {
     }
 }
 
-#[cold]
-#[inline(never)]
-fn panic_queue_state_overflow() -> ! {
-    panic!("queue state must be lesser than or equal to {INTRUSIVE_QUEUE_MAX_STATE}");
-}
-
 impl<S: SyncPrimitives> From<StateOrTail<S>> for *mut NodeLink<S> {
     #[inline(always)]
     fn from(value: StateOrTail<S>) -> Self {
         match value {
-            StateOrTail::State(state) if state > usize::MAX >> STATE_SHIFT => {
-                panic_queue_state_overflow()
-            }
-            StateOrTail::State(state) => ptr::without_provenance_mut(state << STATE_SHIFT),
-            StateOrTail::Tail(tail) => tail.as_ptr(),
+            StateOrTail::State(state) => state_to_ptr(state),
+            StateOrTail::Tail(tail) => tail.as_ptr().map_addr(|addr| addr | TAIL_FLAG),
         }
     }
 }

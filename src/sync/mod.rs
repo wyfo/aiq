@@ -1,3 +1,5 @@
+use core::fmt::Debug;
+
 use crate::sync::{
     mutex::{DefaultMutex, Mutex},
     parker::{DefaultParker, Parker},
@@ -6,12 +8,13 @@ use crate::sync::{
 pub mod mutex;
 pub mod parker;
 
-pub trait SyncPrimitives {
+pub trait SyncPrimitives: Debug {
     type Mutex: Mutex;
     type Parker: Parker;
     const SPIN_BEFORE_PARK: usize;
 }
 
+#[derive(Debug)]
 pub struct DefaultSyncPrimitives;
 
 impl SyncPrimitives for DefaultSyncPrimitives {

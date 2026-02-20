@@ -1,8 +1,13 @@
-use core::{pin::Pin, ptr::NonNull, sync::atomic::Ordering::*};
+use core::{pin::Pin, ptr, ptr::NonNull, sync::atomic::Ordering::*};
 
+#[cfg(feature = "queue-state")]
+use crate::queue::state::*;
 use crate::{
     Queue,
-    queue::{LockedQueue, NodeLink},
+    queue::{
+        LockedQueue, NodeLink,
+        node::{NodeLinkState, NodeWithData},
+    },
     sync::SyncPrimitives,
 };
 
@@ -28,7 +33,7 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
     }
 
     fn next_impl(&mut self) -> Option<Pin<&mut T>> {
-        let mut node = if let Some(tail) = self.tail {
+        let node = if let Some(tail) = self.tail {
             let locked = unsafe { self.locked.as_mut().unwrap_unchecked() };
             let node = unsafe { locked.dequeue().unwrap_unchecked() };
             if node.node == tail.cast() {
@@ -37,20 +42,46 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
             node.node
         } else {
             let sentinel = self.sentinel_node.as_ref()?;
-            let node = sentinel.find_next(|| {
-                Some(sentinel.prev.get()).filter(|n| *n != NonNull::from(sentinel))
-            })?;
+            if sentinel.prev.get() == NonNull::from(sentinel) {
+                self.sentinel_node = None;
+                return None;
+            }
+            let node = sentinel.find_next(|| Some(sentinel.prev.get())).unwrap();
             let node_ref = unsafe { node.as_ref() };
-            node_ref.unlink(Some(node_ref.wait_for_next(None)));
-            node.cast()
+            node_ref.unlink(node_ref.wait_for_next(None));
+            node
         };
-        Some(unsafe { Pin::new_unchecked(&mut node.as_mut().data) })
+        Some(unsafe { Pin::new_unchecked(&mut (*node.cast::<NodeWithData<T, S>>().as_ptr()).data) })
     }
 
     pub fn execute_unlocked<F: FnOnce() -> R, R>(self: Pin<&mut Self>, f: F) -> R {
         let this = unsafe { self.get_unchecked_mut() };
-        // TODO chain to the sentinel
-        drop(unsafe { this.locked.take().unwrap_unchecked() });
+        let locked = unsafe { this.locked.take().unwrap_unchecked() };
+        if let Some(tail) = this.tail {
+            let sentinel = this.sentinel_node.insert(NodeLink::new());
+            sentinel.prev.set(tail);
+            *sentinel.next.get_mut() = (locked.head_sentinel)
+                .wait_for_next(Some(NodeLinkState::Queued))
+                .as_ptr();
+            if let Some(next) = unsafe { NonNull::new(tail.as_ref().next.load(Acquire)) } {
+                locked.head_sentinel.next.store(next.as_ptr(), Release);
+            } else {
+                locked.head_sentinel.next.store(ptr::null_mut(), Relaxed);
+                #[cfg(not(feature = "queue-state"))]
+                let tail_ptr = tail.as_ptr();
+                #[cfg(feature = "queue-state")]
+                let tail_ptr = StateOrTail::Tail(tail).into();
+                if (locked.tail)
+                    .compare_exchange(tail_ptr, ptr::null_mut(), SeqCst, Acquire)
+                    .is_err()
+                {
+                    let next = unsafe { tail.as_ref().wait_for_next(Some(NodeLinkState::Queued)) };
+                    locked.head_sentinel.next.store(next.as_ptr(), Release);
+                }
+            }
+            this.tail = None;
+        }
+        drop(locked);
         let res = f();
         this.locked = Some(this.queue.lock());
         res

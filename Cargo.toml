@@ -7,11 +7,9 @@ edition = "2024"
 default = ["std"]
 atomic-wait = ["dep:atomic-wait"]
 lock_api = ["dep:lock_api"]
-nightly = []
 parking_lot = ["dep:parking_lot", "lock_api"]
 queue-state = []
 std = []
-
 
 [dependencies]
 atomic-wait = { version = "1.1.0", optional = true }
@@ -21,7 +19,25 @@ lock_api = { version = "0.4", optional = true }
 parking_lot = { version = "0.12", optional = true }
 
 [dev-dependencies]
+arrayvec = "0.7.6"
+futures = "0.3.32"
+pin-project-lite = "0.2.16"
 tokio = { version = "1.49.0", features = ["sync"] }
+tokio-test = "0.4.5"
+
+[[example]]
+name = "notify"
+required-features = ["queue-state"]
+
+[[test]]
+name = "notify"
+required-features = ["queue-state"]
 
 [package.metadata.docs.rs]
 all-features = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(nightly)"] }
+
+[lints.clippy]
+dbg_macro = "warn"
