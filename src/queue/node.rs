@@ -64,42 +64,12 @@ impl<S: SyncPrimitives> NodeLink<S> {
         NonNull::new(self.next.load(SeqCst))
     }
 
-    pub(super) fn find_next(
-        &self,
-        tail: impl FnOnce() -> Option<NonNull<NodeLink<S>>>,
-    ) -> Option<NonNull<NodeLink<S>>> {
-        if let Some(next) = self.next() {
-            return Some(next);
-        }
-        self.find_next_backward(tail())
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn find_next_backward(
-        &self,
-        tail: Option<NonNull<NodeLink<S>>>,
-    ) -> Option<NonNull<NodeLink<S>>> {
-        let mut next = tail?;
-        loop {
-            // do not use Self::prev because NodeLink will be cast to NodeWithData
-            let prev = unsafe { next.as_ref() }.prev.get();
-            if prev == NonNull::from(self) {
-                return Some(next);
-            }
-            if let Some(node) = self.next() {
-                return Some(node);
-            }
-            next = prev
-        }
-    }
-
     pub(super) fn state(&self) -> NodeLinkState {
         unsafe { NodeLinkState::from(self.state.load(SeqCst)) }
     }
 
     #[inline(always)]
-    pub(super) fn wait_for_next(&self, reset_state: Option<NodeLinkState>) -> NonNull<NodeLink<S>> {
+    pub(super) fn wait_for_next(&self) -> NonNull<NodeLink<S>> {
         for _ in 0..S::SPIN_BEFORE_PARK + 1 {
             if let Some(next) = self.next() {
                 return next;
@@ -107,9 +77,7 @@ impl<S: SyncPrimitives> NodeLink<S> {
             hint::spin_loop();
         }
         let next = self.park_loop();
-        if let Some(reset_state) = reset_state {
-            self.state.store(reset_state as _, Relaxed);
-        }
+        self.state.store(NodeLinkState::Queued as _, Relaxed);
         next
     }
 
@@ -148,12 +116,10 @@ pub enum RawNodeState {
 impl From<NodeLinkState> for RawNodeState {
     #[inline(always)]
     fn from(value: NodeLinkState) -> Self {
-        debug_assert!(value != NodeLinkState::Parked);
         match value {
             NodeLinkState::Unqueued => RawNodeState::Unqueued,
-            NodeLinkState::Queued => RawNodeState::Queued,
+            NodeLinkState::Queued | NodeLinkState::Parked => RawNodeState::Queued,
             NodeLinkState::Dequeued => RawNodeState::Dequeued,
-            _ => unsafe { unreachable_unchecked() },
         }
     }
 }
@@ -281,11 +247,10 @@ impl<'a, T, S: SyncPrimitives> NodeUnqueued<'a, T, S> {
     #[inline]
     pub fn enqueue<I: FnOnce(Pin<&mut T>)>(&mut self, init: I) {
         init(self.data_pinned());
-        // let node = self.link();
         #[cfg(feature = "queue-state")]
-        let new_tail = |tail| (StateOrTail::Tail(self.node.cast()).into(), Some(tail));
+        let new_tail = |tail| Some((StateOrTail::Tail(self.node.cast()).into(), Some(tail)));
         #[cfg(not(feature = "queue-state"))]
-        let new_tail = |tail| (self.node.as_ptr().cast(), Some(tail));
+        let new_tail = |tail| Some((self.node.as_ptr().cast(), Some(tail)));
         unsafe { self.queue.as_ref().enqueue(self.link(), new_tail) };
     }
 
@@ -293,32 +258,34 @@ impl<'a, T, S: SyncPrimitives> NodeUnqueued<'a, T, S> {
     #[inline]
     pub fn fetch_update_queue_state_or_enqueue<
         F: FnMut(QueueState) -> Option<QueueState>,
-        I: FnMut(Option<QueueState>, Pin<&mut T>),
+        I: FnMut(Option<QueueState>, Pin<&mut T>) -> bool,
     >(
         &mut self,
         mut f: F,
         mut init: I,
-    ) -> bool {
+    ) -> Result<(), Option<QueueState>> {
         let new_tail = |tail| match StateOrTail::from(tail) {
             StateOrTail::State(state) => match f(state) {
-                Some(new_state) => (StateOrTail::State(new_state).into(), None),
-                None => {
-                    init(Some(state), self.data_pinned_const());
-                    (
-                        StateOrTail::Tail(self.node.cast()).into(),
-                        Some(ptr::null_mut()),
-                    )
-                }
-            },
-            StateOrTail::Tail(tail) => {
-                init(None, self.data_pinned_const());
-                (
+                Some(new_state) => Some((StateOrTail::State(new_state).into(), None)),
+                None if init(Some(state), self.data_pinned_const()) => Some((
                     StateOrTail::Tail(self.node.cast()).into(),
-                    Some(tail.as_ptr()),
-                )
-            }
+                    Some(ptr::null_mut()),
+                )),
+                None => None,
+            },
+            StateOrTail::Tail(tail) if init(None, self.data_pinned_const()) => Some((
+                StateOrTail::Tail(self.node.cast()).into(),
+                Some(tail.as_ptr()),
+            )),
+            StateOrTail::Tail(_) => None,
         };
-        !unsafe { self.queue.as_ref().enqueue(self.link(), new_tail) }
+        match unsafe { self.queue.as_ref().enqueue(self.link(), new_tail) } {
+            Some(tail) => Err(match tail.into() {
+                StateOrTail::State(state) => Some(state),
+                _ => None,
+            }),
+            None => Ok(()),
+        }
     }
 }
 

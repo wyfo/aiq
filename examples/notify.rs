@@ -8,6 +8,7 @@ use aiq::{Node, NodeState, Queue};
 use arrayvec::ArrayVec;
 use pin_project_lite::pin_project;
 
+#[derive(Default)]
 struct Waiter {
     waker: Option<Waker>,
     notification: Option<Notification>,
@@ -35,7 +36,7 @@ impl Notify {
     }
 
     fn notify_single(&self, notification: Notification) {
-        if let Some(mut locked) = self.queue.fetch_update_state_or_lock(|_| 1) {
+        if let Err(mut locked) = self.queue.fetch_update_state_or_lock(|_| Some(1)) {
             let mut waiter = match notification {
                 Notification::One => locked.dequeue().unwrap(),
                 Notification::Last => locked.pop().unwrap(),
@@ -65,11 +66,15 @@ impl Notify {
             let mut wakers = ArrayVec::<Waker, 32>::new();
             {
                 let mut drain = pin!(locked.drain());
-                while let Some(mut waiter) = drain.as_mut().next() {
+                loop {
+                    let Some(mut waiter) = drain.as_mut().next() else {
+                        break;
+                    };
                     waiter.notification = Some(Notification::All);
                     if let Some(waker) = waiter.waker.take() {
                         wakers.push(waker);
                     }
+                    drop(waiter);
                     if wakers.is_full() {
                         drain.as_mut().execute_unlocked(|| {
                             for waker in wakers.drain(..) {
@@ -87,13 +92,7 @@ impl Notify {
 
     pub fn notified(&self) -> Notified<'_> {
         Notified {
-            node: Node::new(
-                NotifyRef(self),
-                Waiter {
-                    waker: None,
-                    notification: None,
-                },
-            ),
+            node: Node::new(NotifyRef(self), Waiter::default()),
             notify_waiters_count: self.notify_waiters_count.load(SeqCst),
             polled_ready: false,
         }
@@ -139,20 +138,20 @@ impl Notified<'_> {
         let (state, notify) = this.node.state_and_queue();
         match state {
             NodeState::Unqueued(mut waiter) => {
-                if notify.0.notify_waiters_count.load(SeqCst) != *this.notify_waiters_count
-                    || waiter.fetch_update_queue_state_or_enqueue(
-                        |state| (state == 1).then_some(0),
-                        |_, mut waiter| {
-                            if let Some(cx) = cx.as_ref() {
-                                waiter.waker.get_or_insert_with(|| cx.waker().clone());
-                            }
-                        },
-                    )
+                if notify.0.notify_waiters_count.load(SeqCst) == *this.notify_waiters_count
+                    && waiter
+                        .fetch_update_queue_state_or_enqueue(
+                            |state| (state == 1).then_some(0),
+                            |_, mut waiter| {
+                                if let Some(cx) = cx.as_ref() {
+                                    waiter.waker.get_or_insert_with(|| cx.waker().clone());
+                                }
+                                true
+                            },
+                        )
+                        .is_err()
                 {
-                    *this.polled_ready = true;
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
+                    return Poll::Pending;
                 }
             }
             NodeState::Queued(mut waiter) => {
@@ -161,13 +160,12 @@ impl Notified<'_> {
                 {
                     waiter.waker = Some(cx.waker().clone());
                 }
-                Poll::Pending
+                return Poll::Pending;
             }
-            NodeState::Dequeued(_) => {
-                *this.polled_ready = true;
-                Poll::Ready(())
-            }
+            NodeState::Dequeued(_) => {}
         }
+        *this.polled_ready = true;
+        Poll::Ready(())
     }
 
     pub fn enable(self: Pin<&mut Self>) -> bool {

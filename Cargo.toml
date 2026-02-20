@@ -22,15 +22,27 @@ parking_lot = { version = "0.12", optional = true }
 arrayvec = "0.7.6"
 futures = "0.3.32"
 pin-project-lite = "0.2.16"
-tokio = { version = "1.49.0", features = ["sync"] }
+tokio = { version = "1.49.0", features = ["sync", "macros"] }
 tokio-test = "0.4.5"
 
 [[example]]
 name = "notify"
 required-features = ["queue-state"]
 
+[[example]]
+name = "semaphore"
+required-features = ["queue-state"]
+
 [[test]]
 name = "notify"
+required-features = ["queue-state"]
+
+[[test]]
+name = "semaphore"
+required-features = ["queue-state"]
+
+[[test]]
+name = "semaphore_owned"
 required-features = ["queue-state"]
 
 [package.metadata.docs.rs]

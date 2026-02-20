@@ -75,16 +75,22 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     }
 
     #[cfg(feature = "queue-state")]
-    pub fn fetch_update_state<F: FnMut(QueueState) -> QueueState>(&self, mut f: F) -> bool {
+    pub fn fetch_update_state<F: FnMut(QueueState) -> Option<QueueState>>(
+        &self,
+        mut f: F,
+    ) -> Result<QueueState, Option<QueueState>> {
         let mut tail = self.tail.load(Relaxed);
         while let StateOrTail::State(state) = tail.into() {
-            let new = StateOrTail::State(f(state)).into();
-            match self.tail.compare_exchange(tail, new, SeqCst, Acquire) {
-                Ok(_) => return true,
+            let Some(new_state) = f(state) else {
+                return Err(Some(state));
+            };
+            let new_tail = StateOrTail::State(new_state).into();
+            match self.tail.compare_exchange(tail, new_tail, SeqCst, Acquire) {
+                Ok(_) => return Ok(state),
                 Err(ptr) => tail = ptr,
             }
         }
-        false
+        Err(None)
     }
 
     #[inline]
@@ -101,32 +107,36 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     }
 
     #[cfg(feature = "queue-state")]
-    pub fn fetch_update_state_or_lock<F: FnMut(QueueState) -> QueueState>(
+    pub fn fetch_update_state_or_lock<F: FnMut(QueueState) -> Option<QueueState>>(
         &self,
         mut f: F,
-    ) -> Option<LockedQueue<'_, T, S>> {
-        if self.fetch_update_state(&mut f) {
-            return None;
+    ) -> Result<QueueState, LockedQueue<'_, T, S>> {
+        if let Ok(state) = self.fetch_update_state(&mut f) {
+            return Ok(state);
         }
         let lock = self.lock();
-        self.fetch_update_state(&mut f).not().then_some(lock)
+        self.fetch_update_state(&mut f).map_err(|_| lock)
     }
 
     unsafe fn enqueue(
         &self,
         node: NonNull<NodeLink<S>>,
-        mut new_tail: impl FnMut(*mut NodeLink<S>) -> (*mut NodeLink<S>, Option<*mut NodeLink<S>>),
-    ) -> bool {
+        mut new_tail: impl FnMut(
+            *mut NodeLink<S>,
+        ) -> Option<(*mut NodeLink<S>, Option<*mut NodeLink<S>>)>,
+    ) -> Option<*mut NodeLink<S>> {
         let mut tail = self.tail.load(Relaxed);
         let prev = loop {
-            let (new_tail, prev) = new_tail(tail);
+            let Some((new_tail, prev)) = new_tail(tail) else {
+                return Some(tail);
+            };
             let prev =
                 prev.map(|p| NonNull::new(p).unwrap_or_else(|| NonNull::from(&self.head_sentinel)));
             if let Some(prev) = prev {
                 unsafe { node.as_ref() }.prev.set(prev);
             }
             match (self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Relaxed) {
-                Ok(_) if prev.is_none() => return false,
+                Ok(_) if prev.is_none() => return None,
                 Ok(_) => break unsafe { prev.unwrap().as_ref() },
                 Err(ptr) => tail = ptr,
             }
@@ -140,7 +150,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
             }
             unpark(prev);
         }
-        true
+        Some(tail)
     }
 }
 
@@ -176,7 +186,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
     }
 
     pub fn dequeue(&mut self) -> Option<NodeDequeuing<'a, '_, T, S>> {
-        let node = self.queue.head_sentinel.find_next(|| self.tail())?.cast();
+        let node = (self.queue.head_sentinel).wait_for_next();
         Some(NodeDequeuing { node, locked: self })
     }
 
@@ -186,7 +196,12 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
     }
 
     pub fn drain(self) -> Drain<'a, T, S> {
-        Drain::new(self)
+        Drain::new(self, ptr::null_mut())
+    }
+
+    #[cfg(feature = "queue-state")]
+    pub fn drain_set_state(self, state: QueueState) -> Drain<'a, T, S> {
+        Drain::new(self, StateOrTail::State(state).into())
     }
 
     unsafe fn remove(
@@ -199,8 +214,6 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             return false;
         }
         let prev = node.prev();
-        let prev_next = prev.wait_for_next(Some(NodeLinkState::Queued));
-        debug_assert_eq!(prev_next, NonNull::from(node));
         prev.next.store(ptr::null_mut(), Relaxed);
         let (new_tail, empty) = if ptr::from_ref(prev) == ptr::from_ref(&self.queue.head_sentinel) {
             (reset_tail(), true)
@@ -219,7 +232,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             .compare_exchange(node_ptr, new_tail, SeqCst, Relaxed)
             .is_err()
         {
-            node.unlink(node.wait_for_next(None));
+            node.unlink(node.wait_for_next());
             return false;
         }
         node.state.store(NodeLinkState::Dequeued as _, Release);
