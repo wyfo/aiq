@@ -115,7 +115,10 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
                 return Err(Some(state));
             };
             let new_tail = StateOrTail::State(new_state).into();
-            match self.tail.compare_exchange(tail, new_tail, SeqCst, Acquire) {
+            match self
+                .tail
+                .compare_exchange_weak(tail, new_tail, SeqCst, Acquire)
+            {
                 Ok(_) => return Ok(state),
                 Err(ptr) => tail = ptr,
             }
@@ -196,7 +199,7 @@ impl<T, S: SyncPrimitives> AsRef<Self> for Queue<T, S> {
     }
 }
 
-pub struct LockedQueue<'a, T, S: SyncPrimitives> {
+pub struct LockedQueue<'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
     queue: &'a Queue<T, S>,
     guard: ManuallyDrop<MutexGuard<'a, S>>,
 }
@@ -330,8 +333,10 @@ impl<T, S: SyncPrimitives> NodeDequeuing<'_, '_, T, S> {
 
     #[cfg(feature = "queue-state")]
     pub fn try_set_queue_state<F: FnOnce() -> QueueState>(self, state: F) -> bool {
+        let mut this = ManuallyDrop::new(self);
         let reset_tail = || StateOrTail::State(state()).into();
-        unsafe { self.locked.remove(self.node.as_ref(), reset_tail) }
+        let node = unsafe { this.node.as_ref() };
+        unsafe { this.locked.remove(node, reset_tail) }
     }
 }
 

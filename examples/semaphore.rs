@@ -53,7 +53,6 @@ impl Semaphore {
     }
 
     #[cold]
-    #[inline(never)]
     pub fn add_permits_locked(&self, mut n: usize) {
         let mut locked = self.0.lock();
         if self.try_add_permits(n) {
@@ -102,11 +101,22 @@ impl Semaphore {
 
     #[inline]
     pub async fn acquire_many(&self, n: u32) -> Result<SemaphorePermit<'_>, AcquireError> {
-        let acquire = Acquire {
-            node: Node::new(SemaphoreRef(self), Waiter::default()),
-            permits: n,
-        };
-        acquire.await?;
+        match (self.0).fetch_update_state(|state| {
+            if state & CLOSED != 0 {
+                return None;
+            }
+            state.checked_sub((n as usize) << PERMIT_SHIFT)
+        }) {
+            Ok(_) => {}
+            Err(Some(state)) if state & CLOSED != 0 => return Err(AcquireError(())),
+            Err(_) => {
+                Acquire {
+                    node: Node::new(SemaphoreRef(self), Waiter::default()),
+                    permits: n,
+                }
+                .await?;
+            }
+        }
         Ok(SemaphorePermit {
             sem: self,
             permits: n,
@@ -232,7 +242,6 @@ pin_project! {
 }
 
 impl<'a> Acquire<'a> {
-    #[inline(always)]
     fn poll_acquire(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), AcquireError>> {
         let this = self.project();
         let (state, semaphore) = this.node.state_and_queue();
@@ -272,7 +281,6 @@ impl<'a> Acquire<'a> {
     }
 
     #[cold]
-    #[inline(never)]
     fn put_back_permits(self: Pin<&mut Self>) {
         let this = self.project();
         let (state, semaphore) = this.node.state_and_queue();
@@ -291,7 +299,7 @@ impl<'a> Acquire<'a> {
 impl<'a> Future for Acquire<'a> {
     type Output = Result<(), AcquireError>;
 
-    #[inline]
+    #[cold]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let res = self.as_mut().poll_acquire(cx);
         if res.is_ready() {

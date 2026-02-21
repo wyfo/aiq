@@ -237,25 +237,7 @@ impl<'a, T, S: SyncPrimitives> NodeUnqueued<'a, T, S> {
     }
 
     #[cfg(feature = "queue-state")]
-    #[inline]
     pub fn fetch_update_queue_state_or_enqueue<
-        F: FnMut(QueueState) -> Option<QueueState>,
-        I: FnMut(Option<QueueState>, Pin<&mut T>) -> bool,
-    >(
-        &mut self,
-        mut f: F,
-        init: I,
-    ) -> Result<(), Option<QueueState>> {
-        if self.queue.fetch_update_state(&mut f).is_ok() {
-            return Ok(());
-        }
-        self.fetch_update_queue_state_or_enqueue_impl(f, init)
-    }
-
-    #[cfg(feature = "queue-state")]
-    #[cold]
-    #[inline(never)]
-    pub fn fetch_update_queue_state_or_enqueue_impl<
         F: FnMut(QueueState) -> Option<QueueState>,
         I: FnMut(Option<QueueState>, Pin<&mut T>) -> bool,
     >(
