@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use aiq::{Node, NodeState, Queue};
+use aiq::{Node, NodeState, Queue, queue::QueueRef, sync::DefaultSyncPrimitives};
 use arrayvec::ArrayVec;
 use pin_project_lite::pin_project;
 
@@ -101,8 +101,10 @@ impl Notify {
 
 struct NotifyRef<'a>(&'a Notify);
 
-impl AsRef<Queue<Waiter>> for NotifyRef<'_> {
-    fn as_ref(&self) -> &Queue<Waiter> {
+impl QueueRef for NotifyRef<'_> {
+    type NodeData = Waiter;
+    type SyncPrimitives = DefaultSyncPrimitives;
+    fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives> {
         &self.0.queue
     }
 }
@@ -110,7 +112,7 @@ impl AsRef<Queue<Waiter>> for NotifyRef<'_> {
 pin_project! {
     pub struct Notified<'a> {
         #[pin]
-        node: Node<NotifyRef<'a>, Waiter>,
+        node: Node<NotifyRef<'a>>,
         notify_waiters_count: u64,
         polled_ready: bool,
     }

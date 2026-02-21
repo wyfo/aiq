@@ -6,7 +6,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use aiq::{Node, NodeState, Queue};
+use aiq::{Node, NodeState, Queue, queue::QueueRef, sync::DefaultSyncPrimitives};
 use arrayvec::ArrayVec;
 use pin_project_lite::pin_project;
 
@@ -174,8 +174,10 @@ impl Semaphore {
 
 struct SemaphoreRef<'a>(&'a Semaphore);
 
-impl AsRef<Queue<Waiter>> for SemaphoreRef<'_> {
-    fn as_ref(&self) -> &Queue<Waiter> {
+impl QueueRef for SemaphoreRef<'_> {
+    type NodeData = Waiter;
+    type SyncPrimitives = DefaultSyncPrimitives;
+    fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives> {
         &self.0.0
     }
 }
@@ -191,7 +193,7 @@ pub enum TryAcquireError {
 pin_project! {
     struct Acquire<'a> {
         #[pin]
-        node: Node<SemaphoreRef<'a>, Waiter>,
+        node: Node<SemaphoreRef<'a>>,
         permits: u32,
     }
 

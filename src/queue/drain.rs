@@ -18,13 +18,13 @@ use crate::{
 };
 
 pub struct Drain<'a, T, S: SyncPrimitives + 'a> {
-    sentinel_node: NodeLink<S>,
+    sentinel_node: NodeLink,
     queue: &'a Queue<T, S>,
     locked: Option<LockedQueue<'a, T, S>>,
 }
 
 impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
-    pub(super) fn new(locked: LockedQueue<'a, T, S>, new_tail: *mut NodeLink<S>) -> Self {
+    pub(super) fn new(mut locked: LockedQueue<'a, T, S>, new_tail: *mut NodeLink) -> Self {
         let mut sentinel_node = NodeLink::new();
         if let Some(tail) =
             (locked.tail()).and_then(|_| NonNull::new(locked.tail.swap(new_tail, SeqCst)))
@@ -34,7 +34,7 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
                 unsafe { core::hint::unreachable_unchecked() };
             };
             sentinel_node.prev.set(tail);
-            *sentinel_node.next.get_mut() = (locked.head_sentinel).wait_for_next().as_ptr();
+            *sentinel_node.next.get_mut() = locked.get_next(&locked.queue.head_sentinel).as_ptr();
         }
         Self {
             sentinel_node,
@@ -80,7 +80,7 @@ impl<'a, T, S: SyncPrimitives> Drop for Drain<'a, T, S> {
 }
 
 pub struct NodeDrained<'drain, 'a, T, S: SyncPrimitives> {
-    node: NonNull<NodeLink<S>>,
+    node: NonNull<NodeLink>,
     drain: &'a mut Drain<'drain, T, S>,
 }
 
@@ -89,7 +89,8 @@ impl<T, S: SyncPrimitives> Drop for NodeDrained<'_, '_, T, S> {
         let next = if self.node == self.drain.sentinel_node.prev.get() {
             ptr::null_mut()
         } else {
-            unsafe { self.node.as_ref().wait_for_next() }.as_ptr()
+            let locked = unsafe { self.drain.locked.as_mut().unwrap_unchecked() };
+            unsafe { locked.wait_for_next(self.node.as_ref()).as_ptr() }
         };
         *self.drain.sentinel_node.next.get_mut() = next;
         unsafe { (self.node.as_ref().state).store(NodeLinkState::Dequeued as _, Release) };
@@ -98,7 +99,7 @@ impl<T, S: SyncPrimitives> Drop for NodeDrained<'_, '_, T, S> {
 
 impl<T, S: SyncPrimitives> NodeDrained<'_, '_, T, S> {
     pub fn data_pinned(&mut self) -> Pin<&mut T> {
-        unsafe { Pin::new_unchecked(&mut (*self.node.cast::<NodeWithData<T, S>>().as_ptr()).data) }
+        unsafe { Pin::new_unchecked(&mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data) }
     }
 }
 
@@ -106,11 +107,11 @@ impl<T, S: SyncPrimitives> Deref for NodeDrained<'_, '_, T, S> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &(*self.node.cast::<NodeWithData<T, S>>().as_ptr()).data }
+        unsafe { &(*self.node.cast::<NodeWithData<T>>().as_ptr()).data }
     }
 }
 impl<T: Unpin, S: SyncPrimitives> DerefMut for NodeDrained<'_, '_, T, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut (*self.node.cast::<NodeWithData<T, S>>().as_ptr()).data }
+        unsafe { &mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data }
     }
 }

@@ -1,6 +1,6 @@
 use core::{ptr, ptr::NonNull};
 
-use crate::{queue::node::NodeLink, sync::SyncPrimitives};
+use crate::queue::node::NodeLink;
 
 pub(super) const TAIL_FLAG: usize = 1;
 pub(super) const STATE_SHIFT: usize = 1;
@@ -9,12 +9,12 @@ pub type QueueState = usize;
 pub const INTRUSIVE_QUEUE_MAX_STATE: QueueState = usize::MAX >> STATE_SHIFT;
 
 #[derive(Debug)]
-pub(super) enum StateOrTail<S: SyncPrimitives> {
+pub(super) enum StateOrTail {
     State(QueueState),
-    Tail(NonNull<NodeLink<S>>),
+    Tail(NonNull<NodeLink>),
 }
 
-pub(super) const fn state_to_ptr<S: SyncPrimitives>(state: QueueState) -> *mut NodeLink<S> {
+pub(super) const fn state_to_ptr(state: QueueState) -> *mut NodeLink {
     #[cold]
     #[inline(never)]
     const fn panic_queue_state_overflow() -> ! {
@@ -26,9 +26,9 @@ pub(super) const fn state_to_ptr<S: SyncPrimitives>(state: QueueState) -> *mut N
     ptr::without_provenance_mut(state << STATE_SHIFT)
 }
 
-impl<S: SyncPrimitives> From<*mut NodeLink<S>> for StateOrTail<S> {
+impl From<*mut NodeLink> for StateOrTail {
     #[inline(always)]
-    fn from(value: *mut NodeLink<S>) -> Self {
+    fn from(value: *mut NodeLink) -> Self {
         if value.addr() & TAIL_FLAG != 0 {
             Self::Tail(unsafe { NonNull::new_unchecked(value.map_addr(|addr| addr & !TAIL_FLAG)) })
         } else {
@@ -37,9 +37,9 @@ impl<S: SyncPrimitives> From<*mut NodeLink<S>> for StateOrTail<S> {
     }
 }
 
-impl<S: SyncPrimitives> From<StateOrTail<S>> for *mut NodeLink<S> {
+impl From<StateOrTail> for *mut NodeLink {
     #[inline(always)]
-    fn from(value: StateOrTail<S>) -> Self {
+    fn from(value: StateOrTail) -> Self {
         match value {
             StateOrTail::State(state) => state_to_ptr(state),
             StateOrTail::Tail(tail) => tail.as_ptr().map_addr(|addr| addr | TAIL_FLAG),

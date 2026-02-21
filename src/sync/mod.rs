@@ -23,5 +23,5 @@ impl SyncPrimitives for DefaultSyncPrimitives {
     #[cfg(not(miri))]
     const SPIN_BEFORE_PARK: usize = 100; // same as `std::sys::sync::mutex::futex`
     #[cfg(miri)]
-    const SPIN_BEFORE_PARK: usize = 1;
+    const SPIN_BEFORE_PARK: usize = 0;
 }

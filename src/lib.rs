@@ -2,8 +2,6 @@
 #![no_std]
 #![cfg_attr(nightly, feature(unsafe_pinned))]
 
-extern crate alloc;
-
 pub mod queue;
 pub mod sync;
 #[cfg(not(nightly))]

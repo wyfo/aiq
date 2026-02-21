@@ -1,5 +1,9 @@
+#[cfg(feature = "std")]
+extern crate std;
+
 use core::{
-    cell::Cell,
+    hint,
+    marker::PhantomData,
     mem,
     mem::ManuallyDrop,
     ops::{Deref, DerefMut, Not},
@@ -23,26 +27,52 @@ pub use state::*;
 
 type MutexGuard<'a, S> = <<S as SyncPrimitives>::Mutex as Mutex>::Guard<'a>;
 
+pub trait QueueRef {
+    type NodeData;
+    type SyncPrimitives: SyncPrimitives;
+
+    fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives>;
+}
+
+impl<T, S: SyncPrimitives> QueueRef for &Queue<T, S> {
+    type NodeData = T;
+    type SyncPrimitives = S;
+    fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives> {
+        self
+    }
+}
+
+#[cfg(feature = "std")]
+impl<T, S: SyncPrimitives> QueueRef for std::sync::Arc<Queue<T, S>> {
+    type NodeData = T;
+    type SyncPrimitives = S;
+    fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives> {
+        self
+    }
+}
+
 #[repr(C)]
 pub struct Queue<T, S: SyncPrimitives = DefaultSyncPrimitives> {
-    tail: AtomicPtr<NodeLink<S>>,
-    head_sentinel: NodeLink<S>,
+    tail: AtomicPtr<NodeLink>,
+    head_sentinel: NodeLink,
     _padding: crossbeam_utils::CachePadded<()>,
     mutex: S::Mutex,
-    head: Cell<Option<NonNull<NodeWithData<T, S>>>>,
+    parker: S::Parker,
+    _phantom: PhantomData<T>,
 }
 
 unsafe impl<T, S: SyncPrimitives> Send for Queue<T, S> {}
 unsafe impl<T, S: SyncPrimitives> Sync for Queue<T, S> {}
 
 impl<T, S: SyncPrimitives> Queue<T, S> {
-    const fn new_impl(tail: *mut NodeLink<S>) -> Self {
+    const fn new_impl(tail: *mut NodeLink) -> Self {
         Self {
             tail: AtomicPtr::new(tail),
             head_sentinel: NodeLink::new(),
             _padding: crossbeam_utils::CachePadded::new(()),
             mutex: S::Mutex::INIT,
-            head: Cell::new(None),
+            parker: S::Parker::INIT,
+            _phantom: PhantomData,
         }
     }
 
@@ -120,11 +150,9 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
 
     unsafe fn enqueue(
         &self,
-        node: NonNull<NodeLink<S>>,
-        mut new_tail: impl FnMut(
-            *mut NodeLink<S>,
-        ) -> Option<(*mut NodeLink<S>, Option<*mut NodeLink<S>>)>,
-    ) -> Option<*mut NodeLink<S>> {
+        node: NonNull<NodeLink>,
+        mut new_tail: impl FnMut(*mut NodeLink) -> Option<(*mut NodeLink, Option<*mut NodeLink>)>,
+    ) -> Option<*mut NodeLink> {
         let mut tail = self.tail.load(Relaxed);
         let prev = loop {
             let Some((new_tail, prev)) = new_tail(tail) else {
@@ -144,13 +172,15 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         (unsafe { node.as_ref() }.state).store(NodeLinkState::Queued as _, Relaxed);
         prev.next.store(node.as_ptr().cast(), SeqCst);
         if prev.state() == NodeLinkState::Parked {
-            #[cold]
-            fn unpark<S: SyncPrimitives>(prev: &NodeLink<S>) {
-                prev.parker.unpark();
-            }
-            unpark(prev);
+            self.unpark();
         }
         Some(tail)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn unpark(&self) {
+        self.parker.unpark();
     }
 }
 
@@ -173,20 +203,46 @@ pub struct LockedQueue<'a, T, S: SyncPrimitives> {
 
 impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
     #[cfg(not(feature = "queue-state"))]
-    fn tail(&self) -> Option<NonNull<NodeLink<S>>> {
+    fn tail(&self) -> Option<NonNull<NodeLink>> {
         NonNull::new(self.queue.tail.load(SeqCst))
     }
 
     #[cfg(feature = "queue-state")]
-    fn tail(&self) -> Option<NonNull<NodeLink<S>>> {
+    fn tail(&self) -> Option<NonNull<NodeLink>> {
         match self.queue.tail.load(SeqCst).into() {
             StateOrTail::Tail(tail) => Some(tail),
             _ => None,
         }
     }
 
+    fn get_next(&mut self, node: &NodeLink) -> NonNull<NodeLink> {
+        if let Some(next) = node.next() {
+            return next;
+        }
+        self.wait_for_next(node)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wait_for_next(&mut self, node: &NodeLink) -> NonNull<NodeLink> {
+        for _ in 0..S::SPIN_BEFORE_PARK {
+            hint::spin_loop();
+            if let Some(next) = node.next() {
+                return next;
+            }
+        }
+        node.state.store(NodeLinkState::Parked as _, SeqCst);
+        loop {
+            if let Some(next) = node.next() {
+                node.state.store(NodeLinkState::Queued as _, Relaxed);
+                return next;
+            }
+            unsafe { self.parker.park() };
+        }
+    }
+
     pub fn dequeue(&mut self) -> Option<NodeDequeuing<'a, '_, T, S>> {
-        let node = (self.queue.head_sentinel).wait_for_next();
+        let node = self.get_next(&self.queue.head_sentinel);
         Some(NodeDequeuing { node, locked: self })
     }
 
@@ -206,8 +262,8 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
 
     unsafe fn remove(
         &mut self,
-        node: &NodeLink<S>,
-        reset_tail: impl FnOnce() -> *mut NodeLink<S>,
+        node: &NodeLink,
+        reset_tail: impl FnOnce() -> *mut NodeLink,
     ) -> bool {
         if let Some(next) = NonNull::new(node.next.load(Acquire)) {
             node.unlink(next);
@@ -232,7 +288,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             .compare_exchange(node_ptr, new_tail, SeqCst, Relaxed)
             .is_err()
         {
-            node.unlink(node.wait_for_next());
+            node.unlink(self.wait_for_next(node));
             return false;
         }
         node.state.store(NodeLinkState::Dequeued as _, Release);
@@ -255,13 +311,13 @@ impl<T, S: SyncPrimitives> Deref for LockedQueue<'_, T, S> {
 }
 
 pub struct NodeDequeuing<'locked, 'a, T, S: SyncPrimitives> {
-    node: NonNull<NodeLink<S>>,
+    node: NonNull<NodeLink>,
     locked: &'a mut LockedQueue<'locked, T, S>,
 }
 
 impl<T, S: SyncPrimitives> NodeDequeuing<'_, '_, T, S> {
     pub fn data_pinned(&mut self) -> Pin<&mut T> {
-        unsafe { Pin::new_unchecked(&mut (*self.node.cast::<NodeWithData<T, S>>().as_ptr()).data) }
+        unsafe { Pin::new_unchecked(&mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data) }
     }
 
     pub fn requeue(self) {
@@ -285,11 +341,11 @@ impl<T, S: SyncPrimitives> Deref for NodeDequeuing<'_, '_, T, S> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &(*self.node.cast::<NodeWithData<T, S>>().as_ptr()).data }
+        unsafe { &(*self.node.cast::<NodeWithData<T>>().as_ptr()).data }
     }
 }
 impl<T: Unpin, S: SyncPrimitives> DerefMut for NodeDequeuing<'_, '_, T, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut (*self.node.cast::<NodeWithData<T, S>>().as_ptr()).data }
+        unsafe { &mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data }
     }
 }
