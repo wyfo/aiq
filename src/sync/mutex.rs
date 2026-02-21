@@ -41,7 +41,7 @@ unsafe impl Mutex for SpinMutex {
         Self: 'a;
     fn lock(&self) -> Self::Guard<'_> {
         while self.0.swap(true, Acquire) {
-            while self.0.load(Relaxed) {
+            while !self.0.load(Relaxed) {
                 core::hint::spin_loop();
             }
         }
@@ -77,11 +77,12 @@ unsafe impl Mutex for StdMutex {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self(std::sync::Mutex::new(()));
     type Guard<'a>
-        = std::sync::MutexGuard<'a, ()>
+        = Option<std::sync::MutexGuard<'a, ()>>
     where
         Self: 'a;
+    #[inline]
     fn lock(&self) -> Self::Guard<'_> {
-        self.0.lock().unwrap()
+        self.0.lock().ok()
     }
     unsafe fn unlock<'a>(&'a self, guard: Self::Guard<'a>) {
         drop(guard);

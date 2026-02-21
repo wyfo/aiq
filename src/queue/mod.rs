@@ -241,16 +241,19 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
         }
     }
 
+    #[inline]
     pub fn dequeue(&mut self) -> Option<NodeDequeuing<'a, '_, T, S>> {
         let node = self.get_next(&self.queue.head_sentinel);
         Some(NodeDequeuing { node, locked: self })
     }
 
+    #[inline]
     pub fn pop(&mut self) -> Option<NodeDequeuing<'a, '_, T, S>> {
         let node = self.tail()?.cast();
         Some(NodeDequeuing { node, locked: self })
     }
 
+    #[inline]
     pub fn drain(self) -> Drain<'a, T, S> {
         Drain::new(self, ptr::null_mut())
     }
@@ -297,6 +300,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
 }
 
 impl<T, S: SyncPrimitives> Drop for LockedQueue<'_, T, S> {
+    #[inline]
     fn drop(&mut self) {
         unsafe { self.queue.mutex.unlock(ManuallyDrop::take(&mut self.guard)) };
     }

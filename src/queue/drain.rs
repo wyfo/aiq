@@ -43,6 +43,7 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
         }
     }
 
+    #[inline]
     pub fn next(self: Pin<&mut Self>) -> Option<NodeDrained<'a, '_, T, S>> {
         (unsafe { self.get_unchecked_mut() }).next_impl()
     }

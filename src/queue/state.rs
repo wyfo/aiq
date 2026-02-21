@@ -14,6 +14,7 @@ pub(super) enum StateOrTail {
     Tail(NonNull<NodeLink>),
 }
 
+#[inline(always)]
 pub(super) const fn state_to_ptr(state: QueueState) -> *mut NodeLink {
     #[cold]
     #[inline(never)]

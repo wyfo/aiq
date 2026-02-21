@@ -53,18 +53,22 @@ impl NodeLink {
         }
     }
 
+    #[inline(always)]
     pub(super) fn prev(&self) -> &NodeLink {
         unsafe { self.prev.get().as_ref() }
     }
 
+    #[inline(always)]
     pub(super) fn next(&self) -> Option<NonNull<NodeLink>> {
         NonNull::new(self.next.load(SeqCst))
     }
 
+    #[inline(always)]
     pub(super) fn state(&self) -> NodeLinkState {
         unsafe { NodeLinkState::from(self.state.load(SeqCst)) }
     }
 
+    #[inline(always)]
     pub(super) fn unlink(&self, next: NonNull<NodeLink>) {
         unsafe { next.as_ref() }.prev.set(self.prev.get());
         self.prev().next.store(next.as_ptr(), Relaxed);
@@ -121,18 +125,22 @@ impl<Q: QueueRef> Node<Q> {
         }
     }
 
+    #[inline(always)]
     pub const fn queue(&self) -> &Q {
         &self.queue
     }
 
+    #[inline(always)]
     pub fn raw_state(&self) -> RawNodeState {
         unsafe { self.node.get().as_ref().unwrap().link.state().into() }
     }
 
+    #[inline(always)]
     pub fn state(self: Pin<&mut Self>) -> NodeState<'_, Q::NodeData, Q::SyncPrimitives> {
         unsafe { self.get_unchecked_mut().state_and_queue_impl().0 }
     }
 
+    #[inline(always)]
     fn state_and_queue_impl(&self) -> (NodeState<'_, Q::NodeData, Q::SyncPrimitives>, &Q) {
         let node = NonNull::from(&self.node);
         let state = match self.raw_state() {
@@ -231,6 +239,23 @@ impl<'a, T, S: SyncPrimitives> NodeUnqueued<'a, T, S> {
     #[cfg(feature = "queue-state")]
     #[inline]
     pub fn fetch_update_queue_state_or_enqueue<
+        F: FnMut(QueueState) -> Option<QueueState>,
+        I: FnMut(Option<QueueState>, Pin<&mut T>) -> bool,
+    >(
+        &mut self,
+        mut f: F,
+        init: I,
+    ) -> Result<(), Option<QueueState>> {
+        if self.queue.fetch_update_state(&mut f).is_ok() {
+            return Ok(());
+        }
+        self.fetch_update_queue_state_or_enqueue_impl(f, init)
+    }
+
+    #[cfg(feature = "queue-state")]
+    #[cold]
+    #[inline(never)]
+    pub fn fetch_update_queue_state_or_enqueue_impl<
         F: FnMut(QueueState) -> Option<QueueState>,
         I: FnMut(Option<QueueState>, Pin<&mut T>) -> bool,
     >(
