@@ -6,6 +6,8 @@ use core::{
     sync::atomic::Ordering::*,
 };
 
+#[cfg(feature = "queue-state")]
+use crate::queue::state::*;
 use crate::{
     Queue,
     queue::{
@@ -27,6 +29,10 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
         if let Some(tail) =
             (locked.tail()).and_then(|_| NonNull::new(locked.tail.swap(new_tail, SeqCst)))
         {
+            #[cfg(feature = "queue-state")]
+            let StateOrTail::Tail(tail) = tail.as_ptr().into() else {
+                unsafe { core::hint::unreachable_unchecked() };
+            };
             sentinel_node.prev.set(tail);
             *sentinel_node.next.get_mut() = (locked.head_sentinel).wait_for_next().as_ptr();
         }

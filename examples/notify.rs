@@ -150,6 +150,7 @@ impl Notified<'_> {
                             },
                         )
                         .is_err()
+                    && notify.0.notify_waiters_count.load(SeqCst) == *this.notify_waiters_count
                 {
                     return Poll::Pending;
                 }

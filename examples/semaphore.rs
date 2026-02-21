@@ -197,16 +197,8 @@ pin_project! {
 
     impl PinnedDrop for Acquire<'_> {
         fn drop(this: Pin<&mut Self>) {
-            let this = this.project();
-            if *this.permits > 0 {
-                let (state, semaphore) = this.node.state_and_queue();
-                match state {
-                    NodeState::Unqueued(_) => {}
-                    NodeState::Queued(waiter) => {
-                        semaphore.0.add_permits((*this.permits - waiter.permits) as _);
-                    }
-                    NodeState::Dequeued(_) => semaphore.0.add_permits(*this.permits as _),
-                }
+            if this.permits > 0 {
+                this.add_permits();
             }
         }
     }
@@ -250,13 +242,33 @@ impl<'a> Acquire<'a> {
             NodeState::Dequeued(_) => Poll::Ready(Ok(())),
         }
     }
+
+    #[cold]
+    #[inline(never)]
+    fn add_permits(self: Pin<&mut Self>) {
+        let this = self.project();
+        let (state, semaphore) = this.node.state_and_queue();
+        match state {
+            NodeState::Unqueued(_) => {}
+            NodeState::Queued(waiter) => {
+                semaphore
+                    .0
+                    .add_permits((*this.permits - waiter.permits) as _);
+            }
+            NodeState::Dequeued(_) => semaphore.0.add_permits(*this.permits as _),
+        }
+    }
 }
 
 impl<'a> Future for Acquire<'a> {
     type Output = Result<(), AcquireError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.poll_acquire(cx)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let res = self.as_mut().poll_acquire(cx);
+        if res.is_ready() {
+            *self.project().permits = 0;
+        }
+        res
     }
 }
 

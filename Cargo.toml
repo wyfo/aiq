@@ -20,9 +20,10 @@ parking_lot = { version = "0.12", optional = true }
 
 [dev-dependencies]
 arrayvec = "0.7.6"
+criterion = "0.8.2"
 futures = "0.3.32"
 pin-project-lite = "0.2.16"
-tokio = { version = "1.49.0", features = ["sync", "macros"] }
+tokio = { version = "1.49.0", features = ["full"] }
 tokio-test = "0.4.5"
 
 [[example]]
@@ -31,6 +32,14 @@ required-features = ["queue-state"]
 
 [[example]]
 name = "semaphore"
+required-features = ["queue-state"]
+
+[[test]]
+name = "miri_notify"
+required-features = ["queue-state"]
+
+[[test]]
+name = "miri_semaphore"
 required-features = ["queue-state"]
 
 [[test]]
@@ -44,6 +53,24 @@ required-features = ["queue-state"]
 [[test]]
 name = "semaphore_owned"
 required-features = ["queue-state"]
+
+[[bench]]
+name = "notify"
+required-features = ["queue-state"]
+harness = false
+
+[[bench]]
+name = "tokio_notify"
+harness = false
+
+[[bench]]
+name = "semaphore"
+required-features = ["queue-state"]
+harness = false
+
+[[bench]]
+name = "tokio_semaphore"
+harness = false
 
 [package.metadata.docs.rs]
 all-features = true

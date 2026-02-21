@@ -1,4 +1,12 @@
-include!("../examples/semaphore.rs");
+#![cfg(not(miri))]
+#[allow(dead_code)]
+mod semaphore {
+    include!("../examples/semaphore.rs");
+}
+
+use std::sync::Arc;
+
+use semaphore::Semaphore;
 
 #[test]
 fn try_acquire() {

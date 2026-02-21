@@ -20,5 +20,8 @@ pub struct DefaultSyncPrimitives;
 impl SyncPrimitives for DefaultSyncPrimitives {
     type Mutex = DefaultMutex;
     type Parker = DefaultParker;
+    #[cfg(not(miri))]
     const SPIN_BEFORE_PARK: usize = 100; // same as `std::sys::sync::mutex::futex`
+    #[cfg(miri)]
+    const SPIN_BEFORE_PARK: usize = 1;
 }
