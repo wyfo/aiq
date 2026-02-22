@@ -132,7 +132,7 @@ impl<Q: QueueRef> Node<Q> {
 
     #[inline(always)]
     pub fn raw_state(&self) -> RawNodeState {
-        unsafe { self.node.get().as_ref().unwrap().link.state().into() }
+        unsafe { (*self.node.get()).link.state().into() }
     }
 
     #[inline(always)]
