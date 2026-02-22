@@ -99,7 +99,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         #[cfg(feature = "queue-state")]
-        return self.state().is_none();
+        return self.state().is_some();
         #[cfg(not(feature = "queue-state"))]
         return self.tail.load(SeqCst).is_null();
     }
