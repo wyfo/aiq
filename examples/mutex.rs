@@ -55,7 +55,7 @@ impl<T: ?Sized> Mutex<T> {
         }
         Lock {
             node: Node::new(&self.queue, None),
-            polled_ready: false,
+            completed: false,
         }
         .await;
         MutexGuard { mutex: self }
@@ -100,14 +100,14 @@ pin_project! {
     pub struct Lock<'a> {
         #[pin]
         node: Node<&'a Queue<Option<Waker>>>,
-        polled_ready: bool,
+        completed: bool,
     }
 
     impl PinnedDrop for Lock<'_> {
         #[inline]
         fn drop(this: Pin<&mut Self>) {
-            if !this.polled_ready {
-                this.handle_cancel();
+            if !this.completed {
+                this.cancel();
             }
         }
     }
@@ -144,12 +144,12 @@ impl Lock<'_> {
     }
 
     #[cold]
-    fn handle_cancel(self: Pin<&mut Self>) {
+    fn cancel(self: Pin<&mut Self>) {
         let (state, queue) = self.project().node.state_and_queue();
         match state {
             NodeState::Unqueued(_) => unreachable!(),
             NodeState::Queued(waiter) => {
-                waiter.dequeue_and_try_set_queue_state(|| STATE_LOCKED);
+                let _ = waiter.dequeue_try_set_queue_state(|| STATE_LOCKED);
             }
             NodeState::Dequeued(_) => {
                 if let Some(locked) = queue.is_empty_or_lock() {
@@ -167,7 +167,7 @@ impl Future for Lock<'_> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let res = self.as_mut().poll_lock(cx);
         if res.is_ready() {
-            *self.project().polled_ready = true;
+            *self.project().completed = true;
         }
         res
     }

@@ -61,7 +61,6 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
         if let Some(next) = NonNull::new(*this.sentinel_node.next.get_mut()) {
             unsafe { next.as_ref().prev.set(sentinel_ptr) };
             (this.sentinel_node.prev().next).store(sentinel_ptr.as_ptr(), Relaxed);
-            *this.sentinel_node.next.get_mut() = sentinel_ptr.as_ptr();
         }
         drop(unsafe { this.locked.take().unwrap_unchecked() });
         let res = f();
@@ -91,7 +90,7 @@ impl<T, S: SyncPrimitives> Drop for NodeDrained<'_, '_, T, S> {
             ptr::null_mut()
         } else {
             let locked = unsafe { self.drain.locked.as_mut().unwrap_unchecked() };
-            unsafe { locked.wait_for_next(self.node.as_ref()).as_ptr() }
+            unsafe { locked.get_next(self.node.as_ref()).as_ptr() }
         };
         *self.drain.sentinel_node.next.get_mut() = next;
         unsafe { (self.node.as_ref().state).store(NodeLinkState::Dequeued as _, Release) };

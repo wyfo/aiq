@@ -177,7 +177,7 @@ impl<Q: QueueRef> Node<Q> {
 impl<Q: QueueRef> Drop for Node<Q> {
     fn drop(&mut self) {
         if let NodeState::Queued(queued) = self.state_and_queue_impl().0 {
-            queued.dequeue()
+            queued.dequeue();
         }
     }
 }
@@ -277,15 +277,23 @@ pub struct NodeQueued<'a, T, S: SyncPrimitives> {
     locked: LockedQueue<'a, T, S>,
 }
 
-impl<T, S: SyncPrimitives> NodeQueued<'_, T, S> {
-    pub fn dequeue(mut self) {
+impl<'a, T, S: SyncPrimitives> NodeQueued<'a, T, S> {
+    pub fn dequeue(mut self) -> LockedQueue<'a, T, S> {
         unsafe { self.locked.remove(self.link().as_ref(), ptr::null_mut) };
+        self.locked
     }
 
     #[cfg(feature = "queue-state")]
-    pub fn dequeue_and_try_set_queue_state<F: FnOnce() -> QueueState>(mut self, state: F) -> bool {
+    pub fn dequeue_try_set_queue_state<F: FnOnce() -> QueueState>(
+        mut self,
+        state: F,
+    ) -> Result<LockedQueue<'a, T, S>, LockedQueue<'a, T, S>> {
         let reset_tail = || StateOrTail::State(state()).into();
-        unsafe { self.locked.remove(self.link().as_ref(), reset_tail) }
+        if unsafe { self.locked.remove(self.link().as_ref(), reset_tail) } {
+            Ok(self.locked)
+        } else {
+            Err(self.locked)
+        }
     }
 }
 

@@ -294,7 +294,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             .compare_exchange(node_ptr, new_tail, SeqCst, Relaxed)
             .is_err()
         {
-            node.unlink(self.wait_for_next(node));
+            node.unlink(self.get_next(node));
             return false;
         }
         node.state.store(NodeLinkState::Dequeued as _, Release);

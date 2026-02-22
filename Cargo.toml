@@ -26,6 +26,9 @@ pin-project-lite = "0.2.16"
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-test = "0.4.5"
 
+[lib]
+test = false
+
 [[example]]
 name = "mutex"
 required-features = ["queue-state"]

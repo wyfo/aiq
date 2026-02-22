@@ -6,7 +6,11 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use aiq::{Node, NodeState, Queue, queue::QueueRef, sync::DefaultSyncPrimitives};
+use aiq::{
+    Node, NodeState, Queue,
+    queue::{LockedQueue, QueueRef},
+    sync::DefaultSyncPrimitives,
+};
 use arrayvec::ArrayVec;
 use pin_project_lite::pin_project;
 
@@ -25,11 +29,13 @@ pub struct Semaphore(Queue<Waiter>);
 impl Semaphore {
     pub const MAX_PERMITS: usize = usize::MAX >> 3;
 
+    #[inline]
     pub const fn new(permits: usize) -> Self {
         assert!(permits <= Self::MAX_PERMITS);
         Self(Queue::with_state(permits << PERMIT_SHIFT))
     }
 
+    #[inline]
     pub fn available_permits(&self) -> usize {
         self.0.state().unwrap_or(0) >> PERMIT_SHIFT
     }
@@ -37,7 +43,7 @@ impl Semaphore {
     #[inline]
     pub fn add_permits(&self, n: usize) {
         if !self.try_add_permits(n) {
-            self.add_permits_locked(n);
+            self.add_permits_with_lock(n);
         }
     }
 
@@ -53,11 +59,15 @@ impl Semaphore {
     }
 
     #[cold]
-    pub fn add_permits_locked(&self, mut n: usize) {
-        let mut locked = self.0.lock();
+    pub fn add_permits_with_lock(&self, n: usize) {
+        let locked = self.0.lock();
         if self.try_add_permits(n) {
             return;
         }
+        self.add_permits_locked(n, locked);
+    }
+
+    fn add_permits_locked<'a>(&'a self, mut n: usize, mut locked: LockedQueue<'a, Waiter>) {
         let mut wakers = ArrayVec::<Waker, 32>::new();
         loop {
             while let Some(mut waiter) = locked.dequeue() {
@@ -84,6 +94,7 @@ impl Semaphore {
         }
     }
 
+    #[inline]
     pub fn forget_permits(&self, n: usize) -> usize {
         if n == 0 {
             return 0;
@@ -158,10 +169,12 @@ impl Semaphore {
         })
     }
 
+    #[inline]
     pub fn try_acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, TryAcquireError> {
         self.try_acquire_many_owned(1)
     }
 
+    #[inline]
     pub fn try_acquire_many_owned(
         self: Arc<Self>,
         n: u32,
@@ -201,6 +214,7 @@ impl Semaphore {
         }
     }
 
+    #[inline]
     pub fn is_closed(&self) -> bool {
         self.0.state().is_some_and(|state| state & CLOSED != 0)
     }
@@ -235,7 +249,7 @@ pin_project! {
         #[inline(always)]
         fn drop(this: Pin<&mut Self>) {
             if this.permits > 0 {
-                this.put_back_permits();
+                this.cancel();
             }
         }
     }
@@ -281,15 +295,16 @@ impl<'a> Acquire<'a> {
     }
 
     #[cold]
-    fn put_back_permits(self: Pin<&mut Self>) {
+    fn cancel(self: Pin<&mut Self>) {
         let this = self.project();
         let (state, semaphore) = this.node.state_and_queue();
         match state {
             NodeState::Unqueued(_) => {}
             NodeState::Queued(waiter) => {
-                semaphore
-                    .0
-                    .add_permits((*this.permits - waiter.permits) as _);
+                let acquired = (*this.permits - waiter.permits) as _;
+                if let Err(locked) = waiter.dequeue_try_set_queue_state(|| acquired) {
+                    semaphore.0.add_permits_locked(acquired, locked);
+                }
             }
             NodeState::Dequeued(_) => semaphore.0.add_permits(*this.permits as _),
         }
