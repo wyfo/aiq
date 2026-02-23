@@ -25,6 +25,7 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
         let mut sentinel_node = NodeLink::new();
         if locked.tail().is_some() {
             *sentinel_node.next.get_mut() = locked.get_next(&locked.queue.head_sentinel).as_ptr();
+            unsafe { *locked.queue.head_sentinel.next.as_ptr() = ptr::null_mut() };
             let tail = locked.tail.swap(new_tail, SeqCst);
             #[cfg(feature = "queue-state")]
             let tail = match tail.into() {

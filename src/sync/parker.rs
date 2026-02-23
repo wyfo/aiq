@@ -36,11 +36,13 @@ cfg_if::cfg_if! {
 pub struct SpinParker(AtomicBool);
 unsafe impl Parker for SpinParker {
     const INIT: Self = Self(AtomicBool::new(false));
+    #[inline]
     unsafe fn park(&self) {
         while !self.0.load(Acquire) {
             core::hint::spin_loop();
         }
     }
+    #[inline]
     fn unpark(&self) {
         self.0.store(true, Release);
     }
@@ -63,6 +65,7 @@ unsafe impl Parker for AtomicParker {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self(AtomicU32::new(0));
 
+    #[inline]
     unsafe fn park(&self) {
         if self.0.fetch_sub(1, Acquire) == Self::NOTIFIED {
             return;
@@ -79,6 +82,7 @@ unsafe impl Parker for AtomicParker {
         }
     }
 
+    #[inline]
     fn unpark(&self) {
         if self.0.swap(Self::NOTIFIED, Release) == Self::PARKED {
             atomic_wait::wake_one(&self.0);
@@ -111,6 +115,7 @@ unsafe impl Parker for StdParker {
         state: AtomicU8::new(Self::EMPTY),
     };
 
+    #[inline]
     unsafe fn park(&self) {
         if self.state.fetch_sub(1, Acquire) == Self::NOTIFIED {
             return;
@@ -126,6 +131,7 @@ unsafe impl Parker for StdParker {
             .unwrap();
     }
 
+    #[inline]
     fn unpark(&self) {
         if self.state.swap(Self::NOTIFIED, Release) == Self::PARKED {
             drop(self.mutex.lock().unwrap());

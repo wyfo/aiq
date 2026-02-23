@@ -10,7 +10,10 @@ use core::{
     pin::Pin,
     ptr,
     ptr::NonNull,
-    sync::atomic::{AtomicPtr, Ordering::*},
+    sync::{
+        atomic,
+        atomic::{AtomicPtr, Ordering::*},
+    },
 };
 
 use crate::sync::{DefaultSyncPrimitives, SyncPrimitives, mutex::Mutex, parker::Parker};
@@ -91,7 +94,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
 
     #[cfg(feature = "queue-state")]
     #[inline]
-    pub fn state(&self) -> Option<usize> {
+    pub fn state(&self) -> Option<QueueState> {
         match self.tail.load(SeqCst).into() {
             StateOrTail::State(state) => Some(state),
             _ => None,
@@ -107,6 +110,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     }
 
     #[cfg(feature = "queue-state")]
+    #[inline]
     pub fn fetch_update_state<F: FnMut(QueueState) -> Option<QueueState>>(
         &self,
         mut f: F,
@@ -142,15 +146,51 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     }
 
     #[cfg(feature = "queue-state")]
-    pub fn fetch_update_state_or_lock<F: FnMut(QueueState) -> Option<QueueState>>(
+    #[inline]
+    pub fn fetch_update_state_or_lock<F: FnMut(QueueState) -> QueueState>(
         &self,
         mut f: F,
-    ) -> Result<QueueState, LockedQueue<'_, T, S>> {
-        if let Ok(state) = self.fetch_update_state(&mut f) {
-            return Ok(state);
-        }
+    ) -> Option<LockedQueue<'_, T, S>> {
+        self.fetch_update_state(|s| Some(f(s))).err()?;
         let lock = self.lock();
-        self.fetch_update_state(&mut f).map_err(|_| lock)
+        self.fetch_update_state(|s| Some(f(s))).err()?;
+        Some(lock)
+    }
+
+    #[cfg(feature = "queue-state")]
+    #[inline]
+    pub fn fetch_update_state_with_lock<
+        'a,
+        F: FnMut(QueueState) -> QueueState,
+        L: FnOnce(LockedQueue<'a, T, S>) -> R,
+        R,
+    >(
+        &'a self,
+        mut f: F,
+        locked_fallback: L,
+    ) {
+        if self.fetch_update_state(|s| Some(f(s))).is_err() {
+            self.fetch_update_state_locked(f, locked_fallback)
+        }
+    }
+
+    #[cfg(feature = "queue-state")]
+    #[cold]
+    #[inline(never)]
+    pub fn fetch_update_state_locked<
+        'a,
+        F: FnMut(QueueState) -> QueueState,
+        L: FnOnce(LockedQueue<'a, T, S>) -> R,
+        R,
+    >(
+        &'a self,
+        mut f: F,
+        locked_fallback: L,
+    ) {
+        let lock = self.lock();
+        if self.fetch_update_state(|s| Some(f(s))).is_err() {
+            locked_fallback(lock);
+        }
     }
 
     unsafe fn enqueue(
@@ -161,6 +201,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         let mut tail = self.tail.load(Relaxed);
         let prev = loop {
             let Some((new_tail, prev)) = new_tail(tail) else {
+                atomic::fence(Acquire);
                 unsafe { node.as_ref().prev.store(ptr::null_mut(), Relaxed) }
                 return Some(tail);
             };
@@ -205,19 +246,16 @@ pub struct LockedQueue<'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
 }
 
 impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
-    #[cfg(not(feature = "queue-state"))]
     #[inline(always)]
     fn tail(&self) -> Option<NonNull<NodeLink>> {
-        NonNull::new(self.queue.tail.load(SeqCst))
-    }
-
-    #[cfg(feature = "queue-state")]
-    #[inline(always)]
-    fn tail(&self) -> Option<NonNull<NodeLink>> {
-        match self.queue.tail.load(SeqCst).into() {
+        let tail = self.queue.tail.load(SeqCst);
+        #[cfg(not(feature = "queue-state"))]
+        return NonNull::new(tail);
+        #[cfg(feature = "queue-state")]
+        return match tail.into() {
             StateOrTail::Tail(tail) => Some(tail),
             _ => None,
-        }
+        };
     }
 
     #[inline(always)]
@@ -257,7 +295,9 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
 
     #[inline]
     pub fn pop(&mut self) -> Option<NodeDequeuing<'a, '_, T, S>> {
-        let node = self.tail()?.cast();
+        let node = self.tail()?;
+        let prev_next = self.get_next(unsafe { node.as_ref() }.prev());
+        debug_assert_eq!(prev_next, node);
         Some(NodeDequeuing { node, locked: self })
     }
 
@@ -267,29 +307,25 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
     }
 
     #[cfg(feature = "queue-state")]
-    pub fn drain_set_state(self, state: QueueState) -> Drain<'a, T, S> {
+    pub fn drain_try_set_state(self, state: QueueState) -> Drain<'a, T, S> {
         Drain::new(self, StateOrTail::State(state).into())
     }
 
-    unsafe fn remove(
-        &mut self,
-        node: &NodeLink,
-        reset_tail: impl FnOnce() -> *mut NodeLink,
-    ) -> bool {
+    unsafe fn remove(&mut self, node: &NodeLink, new_tail: *mut NodeLink) -> bool {
         if let Some(next) = node.next() {
             node.unlink(next);
             return false;
         }
-        let prev = node.prev();
-        prev.next.store(ptr::null_mut(), Relaxed);
-        let (new_tail, empty) = if ptr::from_ref(prev) == ptr::from_ref(&self.queue.head_sentinel) {
-            (reset_tail(), true)
+        let prev = unsafe { NonNull::new_unchecked(node.prev.load(Relaxed)) };
+        unsafe { *prev.as_ref().next.as_ptr() = ptr::null_mut() };
+        let is_head = prev == (&self.queue.head_sentinel).into();
+        #[cfg(not(feature = "queue-state"))]
+        let new_tail = if is_head { new_tail } else { prev.as_ptr() };
+        #[cfg(feature = "queue-state")]
+        let new_tail = if is_head {
+            new_tail
         } else {
-            #[cfg(not(feature = "queue-state"))]
-            let new_tail = node.prev.load(Relaxed);
-            #[cfg(feature = "queue-state")]
-            let new_tail = StateOrTail::Tail(node.prev().into()).into();
-            (new_tail, false)
+            StateOrTail::Tail(prev).into()
         };
         #[cfg(not(feature = "queue-state"))]
         let node_ptr = ptr::from_ref(node).cast_mut();
@@ -303,7 +339,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             return false;
         }
         node.dequeue();
-        empty
+        is_head
     }
 }
 
@@ -337,17 +373,15 @@ impl<T, S: SyncPrimitives> NodeDequeuing<'_, '_, T, S> {
     }
 
     #[cfg(feature = "queue-state")]
-    pub fn try_set_queue_state<F: FnOnce() -> QueueState>(self, state: F) -> bool {
-        let mut this = ManuallyDrop::new(self);
-        let reset_tail = || StateOrTail::State(state()).into();
-        let node = unsafe { this.node.as_ref() };
-        unsafe { this.locked.remove(node, reset_tail) }
+    pub fn try_set_queue_state(self, state: QueueState) -> bool {
+        let this = &mut *ManuallyDrop::new(self);
+        unsafe { (this.locked).remove(this.node.as_ref(), StateOrTail::State(state).into()) }
     }
 }
 
 impl<T, S: SyncPrimitives> Drop for NodeDequeuing<'_, '_, T, S> {
     fn drop(&mut self) {
-        unsafe { self.locked.remove(self.node.as_ref(), ptr::null_mut) };
+        unsafe { self.locked.remove(self.node.as_ref(), ptr::null_mut()) };
     }
 }
 

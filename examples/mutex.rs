@@ -73,14 +73,7 @@ impl<T: ?Sized> Mutex<T> {
     }
 
     fn unlock(&self) {
-        if self.queue.fetch_update_state(|_| Some(0)).is_err() {
-            self.unlock_contended();
-        }
-    }
-
-    #[cold]
-    fn unlock_contended(&self) {
-        wake_next(self.queue.lock());
+        (self.queue).fetch_update_state_with_lock(|_| STATE_UNLOCKED, wake_next);
     }
 }
 
@@ -88,7 +81,7 @@ fn wake_next(mut locked: LockedQueue<'_, Option<Waker>>) {
     let mut waker = None;
     if let Some(mut waiter) = locked.dequeue() {
         waker = waiter.take();
-        waiter.try_set_queue_state(|| STATE_LOCKED);
+        waiter.try_set_queue_state(STATE_LOCKED);
     }
     drop(locked);
     if let Some(waker) = waker {
@@ -116,11 +109,10 @@ pin_project! {
 impl Lock<'_> {
     fn poll_lock(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = self.project();
-        let (state, queue) = this.node.state_and_queue();
-        match state {
+        match this.node.state() {
             NodeState::Unqueued(waiter) => {
                 for _ in 0..SPIN {
-                    if queue.state() == Some(STATE_UNLOCKED) {
+                    if waiter.queue().state() == Some(STATE_UNLOCKED) {
                         break;
                     }
                     hint::spin_loop();
@@ -145,14 +137,13 @@ impl Lock<'_> {
 
     #[cold]
     fn cancel(self: Pin<&mut Self>) {
-        let (state, queue) = self.project().node.state_and_queue();
-        match state {
+        match self.project().node.state() {
             NodeState::Unqueued(_) => unreachable!(),
             NodeState::Queued(waiter) => {
-                let _ = waiter.dequeue_try_set_queue_state(|| STATE_LOCKED);
+                let _ = waiter.dequeue_try_set_queue_state(STATE_LOCKED);
             }
-            NodeState::Dequeued(_) => {
-                if let Some(locked) = queue.is_empty_or_lock() {
+            NodeState::Dequeued(waiter) => {
+                if let Some(locked) = waiter.queue().is_empty_or_lock() {
                     wake_next(locked);
                 }
             }

@@ -27,6 +27,7 @@ impl<T: ?Sized> UnsafePinned<T> {
         self.value.get()
     }
 
+    #[allow(dead_code)]
     #[inline(always)]
     pub const fn raw_get(this: *const Self) -> *mut T {
         UnsafeCell::raw_get(this as _)

@@ -39,6 +39,7 @@ unsafe impl Mutex for SpinMutex {
         = ()
     where
         Self: 'a;
+    #[inline]
     fn lock(&self) -> Self::Guard<'_> {
         while self.0.swap(true, Acquire) {
             while !self.0.load(Relaxed) {
@@ -46,6 +47,7 @@ unsafe impl Mutex for SpinMutex {
             }
         }
     }
+    #[inline]
     unsafe fn unlock<'a>(&'a self, _guard: Self::Guard<'a>) {
         self.0.store(false, Release)
     }
@@ -59,9 +61,11 @@ unsafe impl<M: lock_api::RawMutex> Mutex for M {
     where
         Self: 'a;
 
+    #[inline]
     fn lock(&self) -> Self::Guard<'_> {
         lock_api::RawMutex::lock(self);
     }
+    #[inline]
     unsafe fn unlock<'a>(&'a self, _guard: Self::Guard<'a>) {
         // SAFETY: same contract
         unsafe { self.unlock() }
@@ -84,6 +88,7 @@ unsafe impl Mutex for StdMutex {
     fn lock(&self) -> Self::Guard<'_> {
         self.0.lock().ok()
     }
+    #[inline]
     unsafe fn unlock<'a>(&'a self, guard: Self::Guard<'a>) {
         drop(guard);
     }
