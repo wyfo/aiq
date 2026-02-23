@@ -402,11 +402,3 @@ impl Drop for OwnedSemaphorePermit {
 }
 
 fn main() {}
-
-#[unsafe(no_mangle)]
-fn plop(s: &Semaphore, cx: &mut Context) {
-    match pin!(s.acquire()).poll(cx) {
-        Poll::Ready(permits) => drop(permits.unwrap()),
-        Poll::Pending => unreachable!(),
-    }
-}

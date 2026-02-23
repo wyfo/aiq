@@ -319,29 +319,3 @@ fn notify_waiters_sequential_notified_await() {
 
     receiver.join().unwrap();
 }
-
-#[test]
-fn plop() {
-    use std::sync::atomic::{AtomicUsize, Ordering::*};
-    let notify = Notify::new();
-    let counter = AtomicUsize::new(0);
-
-    thread::scope(|s| {
-        for _ in 0..10 {
-            s.spawn(|| {
-                block_on(async {
-                    while counter.load(Relaxed) < 100 {
-                        notify.notified().await;
-                        counter.fetch_add(1, Relaxed);
-                    }
-                })
-            });
-        }
-        while counter.load(Relaxed) < 100 {
-            notify.notify_waiters();
-        }
-        for _ in 0..10 {
-            notify.notify_waiters();
-        }
-    })
-}
