@@ -62,6 +62,10 @@ name = "notify"
 required-features = ["queue-state"]
 
 [[test]]
+name = "notify_owned"
+required-features = ["queue-state"]
+
+[[test]]
 name = "semaphore"
 required-features = ["queue-state"]
 

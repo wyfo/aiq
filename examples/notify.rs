@@ -1,6 +1,10 @@
 use std::{
+    ops::Deref,
     pin::{Pin, pin},
-    sync::atomic::{AtomicU64, Ordering::SeqCst},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering::SeqCst},
+    },
     task::{Context, Poll, Waker},
 };
 
@@ -101,16 +105,29 @@ impl Notify {
     #[inline]
     pub fn notified(&self) -> Notified<'_> {
         Notified {
-            node: Node::new(NotifyRef(self), Waiter::default()),
-            generation: self.generation.load(SeqCst),
-            completed: false,
+            inner: NotifiedInner {
+                node: Node::new(NotifyRef(self), Waiter::default()),
+                generation: self.generation.load(SeqCst),
+                completed: false,
+            },
+        }
+    }
+
+    #[inline]
+    pub fn notified_owned(self: Arc<Self>) -> OwnedNotified {
+        OwnedNotified {
+            inner: NotifiedInner {
+                generation: self.generation.load(SeqCst),
+                node: Node::new(NotifyRef(self), Waiter::default()),
+                completed: false,
+            },
         }
     }
 }
 
-struct NotifyRef<'a>(&'a Notify);
+struct NotifyRef<N>(N);
 
-impl QueueRef for NotifyRef<'_> {
+impl<N: Deref<Target = Notify>> QueueRef for NotifyRef<N> {
     type NodeData = Waiter;
     type SyncPrimitives = DefaultSyncPrimitives;
     fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives> {
@@ -119,23 +136,23 @@ impl QueueRef for NotifyRef<'_> {
 }
 
 pin_project! {
-    pub struct Notified<'a> {
+    struct NotifiedInner<N: Deref<Target = Notify>> {
         #[pin]
-        node: Node<NotifyRef<'a>>,
+        node: Node<NotifyRef<N>>,
         generation: u64,
         completed: bool,
     }
 
-    impl PinnedDrop for Notified<'_> {
+    impl<N: Deref<Target = Notify>> PinnedDrop for NotifiedInner<N> {
         fn drop(mut this: Pin<&mut Self>) {
             if !this.completed {
-               Notified::cancel(this.project().node);
+               NotifiedInner::cancel(this.project().node);
             }
         }
     }
 }
 
-impl Notified<'_> {
+impl<N: Deref<Target = Notify>> NotifiedInner<N> {
     fn poll_notified(self: Pin<&mut Self>, cx: Option<&mut Context<'_>>) -> Poll<()> {
         let mut this = self.project();
         let mut enqueued = false;
@@ -179,12 +196,8 @@ impl Notified<'_> {
         Poll::Ready(())
     }
 
-    pub fn enable(self: Pin<&mut Self>) -> bool {
-        self.poll_notified(None).is_ready()
-    }
-
     #[cold]
-    fn cancel(node: Pin<&mut Node<NotifyRef<'_>>>) {
+    fn cancel(node: Pin<&mut Node<NotifyRef<N>>>) {
         match node.state() {
             NodeState::Unqueued(_) => {}
             NodeState::Queued(waiter) => {
@@ -199,11 +212,45 @@ impl Notified<'_> {
     }
 }
 
+pin_project! {
+    pub struct Notified<'a> {
+        #[pin]
+        inner: NotifiedInner<&'a Notify>
+    }
+}
+
+impl Notified<'_> {
+    pub fn enable(self: Pin<&mut Self>) -> bool {
+        self.project().inner.poll_notified(None).is_ready()
+    }
+}
+
 impl Future for Notified<'_> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.poll_notified(Some(cx))
+        self.project().inner.poll_notified(Some(cx))
+    }
+}
+
+pin_project! {
+    pub struct OwnedNotified {
+        #[pin]
+        inner: NotifiedInner<Arc<Notify>>
+    }
+}
+
+impl OwnedNotified {
+    pub fn enable(self: Pin<&mut Self>) -> bool {
+        self.project().inner.poll_notified(None).is_ready()
+    }
+}
+
+impl Future for OwnedNotified {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.project().inner.poll_notified(Some(cx))
     }
 }
 
