@@ -118,7 +118,7 @@ impl Lock<'_> {
         let this = self.project();
         let (state, queue) = this.node.state_and_queue();
         match state {
-            NodeState::Unqueued(mut waiter) => {
+            NodeState::Unqueued(waiter) => {
                 for _ in 0..SPIN {
                     if queue.state() == Some(STATE_UNLOCKED) {
                         break;

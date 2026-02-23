@@ -42,59 +42,72 @@ impl Notify {
         }
     }
 
+    #[inline(always)]
     fn notify_single(&self, notification: Notification) {
-        if let Err(mut locked) = (self.queue).fetch_update_state_or_lock(|_| Some(STATE_NOTIFIED)) {
-            let mut waiter = match notification {
-                Notification::One => locked.dequeue().unwrap(),
-                Notification::Last => locked.pop().unwrap(),
-                _ => unreachable!(),
-            };
-            waiter.notification = Some(notification);
-            let waker = waiter.waker.take();
-            drop(waiter);
-            drop(locked);
-            if let Some(waker) = waker {
-                waker.wake();
-            }
+        if (self.queue.fetch_update_state(|_| Some(STATE_NOTIFIED))).is_err() {
+            self.notify_single_cold(notification);
         }
     }
 
+    #[cold]
+    fn notify_single_cold(&self, notification: Notification) {
+        let mut locked = self.queue.lock();
+        if locked.fetch_update_state(|_| Some(STATE_NOTIFIED)).is_ok() {
+            return;
+        }
+        let mut waiter = match notification {
+            Notification::One => locked.dequeue().unwrap(),
+            Notification::Last => locked.pop().unwrap(),
+            _ => unreachable!(),
+        };
+        waiter.notification = Some(notification);
+        let waker = waiter.waker.take();
+        waiter.try_set_queue_state(|| STATE_UNNOTIFIED);
+        drop(locked);
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    #[inline]
     pub fn notify_one(&self) {
         self.notify_single(Notification::One);
     }
 
+    #[inline]
     pub fn notify_last(&self) {
         self.notify_single(Notification::Last);
     }
 
+    #[inline]
     pub fn notify_waiters(&self) {
+        if self.queue.is_empty() {
+            self.notify_waiters_count.fetch_add(1, SeqCst);
+        } else {
+            self.notify_waiters_cold();
+        }
+    }
+
+    #[cold]
+    pub fn notify_waiters_cold(&self) {
+        let locked = self.queue.lock();
         self.notify_waiters_count.fetch_add(1, SeqCst);
-        if let Some(locked) = self.queue.is_empty_or_lock() {
-            let mut wakers = ArrayVec::<Waker, 32>::new();
-            {
-                let mut drain = pin!(locked.drain_set_state(STATE_UNNOTIFIED));
-                loop {
-                    let Some(mut waiter) = drain.as_mut().next() else {
-                        break;
-                    };
-                    waiter.notification = Some(Notification::All);
-                    if let Some(waker) = waiter.waker.take() {
-                        wakers.push(waker);
-                    }
-                    drop(waiter);
-                    if wakers.is_full() {
-                        drain.as_mut().execute_unlocked(|| {
-                            for waker in wakers.drain(..) {
-                                waker.wake();
-                            }
-                        });
-                    }
+        let mut wakers = ArrayVec::<Waker, 32>::new();
+        {
+            let mut drain = pin!(locked.drain_set_state(STATE_UNNOTIFIED));
+            loop {
+                let Some(mut waiter) = drain.as_mut().next() else {
+                    break;
+                };
+                waiter.notification = Some(Notification::All);
+                wakers.push(waiter.waker.take().unwrap());
+                drop(waiter);
+                if wakers.is_full() {
+                    (drain.as_mut()).execute_unlocked(|| wakers.drain(..).for_each(Waker::wake));
                 }
             }
-            for waker in wakers {
-                waker.wake();
-            }
         }
+        wakers.into_iter().for_each(Waker::wake);
     }
 
     pub fn notified(&self) -> Notified<'_> {
@@ -135,10 +148,10 @@ pin_project! {
 
 impl Notified<'_> {
     fn poll_notified(self: Pin<&mut Self>, cx: Option<&mut Context<'_>>) -> Poll<()> {
-        let this = self.project();
-        let (state, notify) = this.node.state_and_queue();
+        let mut this = self.project();
+        let (state, notify) = this.node.as_mut().state_and_queue();
         match state {
-            NodeState::Unqueued(mut waiter) => {
+            NodeState::Unqueued(waiter) => {
                 if waiter
                     .fetch_update_queue_state_or_enqueue(
                         |state| (state == STATE_NOTIFIED).then_some(STATE_UNNOTIFIED),
@@ -154,6 +167,11 @@ impl Notified<'_> {
                 {
                     return Poll::Pending;
                 }
+            }
+            NodeState::Queued(waiter)
+                if notify.0.notify_waiters_count.load(SeqCst) != *this.notify_waiters_count =>
+            {
+                waiter.dequeue_try_set_queue_state(|| STATE_UNNOTIFIED).ok();
             }
             NodeState::Queued(mut waiter) => {
                 if let Some(cx) = cx

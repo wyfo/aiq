@@ -1,15 +1,13 @@
 #[cfg(nightly)]
 use core::pin::UnsafePinned;
 use core::{
-    cell::Cell,
     hint::unreachable_unchecked,
     marker::PhantomData,
-    mem,
     ops::{Deref, DerefMut},
     pin::Pin,
     ptr,
     ptr::NonNull,
-    sync::atomic::{AtomicPtr, AtomicUsize, Ordering::*},
+    sync::atomic::{AtomicPtr, Ordering::*},
 };
 
 #[cfg(feature = "queue-state")]
@@ -18,44 +16,31 @@ use crate::queue::state::*;
 use crate::unsafe_pinned::UnsafePinned;
 use crate::{
     queue::{LockedQueue, Queue, QueueRef},
-    sync::SyncPrimitives,
+    sync::{DefaultSyncPrimitives, SyncPrimitives},
 };
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[repr(usize)]
-pub(super) enum NodeLinkState {
-    Unqueued,
-    Queued,
-    Dequeued,
-    Parked,
-}
-
-impl NodeLinkState {
-    #[inline(always)]
-    pub(super) unsafe fn from(value: usize) -> Self {
-        unsafe { mem::transmute::<usize, Self>(value) }
-    }
-}
 
 #[repr(C)]
 pub(super) struct NodeLink {
-    pub(super) prev: Cell<NonNull<NodeLink>>,
+    pub(super) prev: AtomicPtr<NodeLink>,
     pub(super) next: AtomicPtr<NodeLink>,
-    pub(super) state: AtomicUsize,
 }
 
 impl NodeLink {
     pub(super) const fn new() -> Self {
         Self {
-            prev: Cell::new(NonNull::dangling()),
+            prev: AtomicPtr::new(ptr::null_mut()),
             next: AtomicPtr::new(ptr::null_mut()),
-            state: AtomicUsize::new(NodeLinkState::Unqueued as _),
         }
     }
 
     #[inline(always)]
     pub(super) fn prev(&self) -> &NodeLink {
-        unsafe { self.prev.get().as_ref() }
+        unsafe { self.prev.load(Relaxed).as_ref().unwrap_unchecked() }
+    }
+
+    pub(super) fn dequeue(&self) {
+        let dequeued = ptr::without_provenance_mut(RawNodeState::Dequeued as _);
+        self.prev.store(dequeued, Release);
     }
 
     #[inline(always)]
@@ -64,15 +49,20 @@ impl NodeLink {
     }
 
     #[inline(always)]
-    pub(super) fn state(&self) -> NodeLinkState {
-        unsafe { NodeLinkState::from(self.state.load(SeqCst)) }
+    pub(super) fn state(&self) -> RawNodeState {
+        match self.prev.load(Acquire).addr().min(2) {
+            0 => RawNodeState::Unqueued,
+            1 => RawNodeState::Dequeued,
+            2 => RawNodeState::Queued,
+            _ => unreachable!(),
+        }
     }
 
     #[inline(always)]
     pub(super) fn unlink(&self, next: NonNull<NodeLink>) {
-        unsafe { next.as_ref() }.prev.set(self.prev.get());
+        unsafe { next.as_ref().prev.store(self.prev.load(Relaxed), Relaxed) };
         self.prev().next.store(next.as_ptr(), Relaxed);
-        self.state.store(NodeLinkState::Dequeued as _, Release);
+        self.dequeue();
     }
 }
 
@@ -84,23 +74,12 @@ pub(super) struct NodeWithData<T> {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum RawNodeState {
-    Unqueued,
-    Queued,
-    Dequeued,
+    Unqueued = 0,
+    Queued = 2,
+    Dequeued = 1,
 }
 
-impl From<NodeLinkState> for RawNodeState {
-    #[inline(always)]
-    fn from(value: NodeLinkState) -> Self {
-        match value {
-            NodeLinkState::Unqueued => RawNodeState::Unqueued,
-            NodeLinkState::Queued | NodeLinkState::Parked => RawNodeState::Queued,
-            NodeLinkState::Dequeued => RawNodeState::Dequeued,
-        }
-    }
-}
-
-pub enum NodeState<'a, T, S: SyncPrimitives> {
+pub enum NodeState<'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
     Unqueued(NodeUnqueued<'a, T, S>),
     Queued(NodeQueued<'a, T, S>),
     Dequeued(NodeDequeued<'a, T, S>),
@@ -132,7 +111,7 @@ impl<Q: QueueRef> Node<Q> {
 
     #[inline(always)]
     pub fn raw_state(&self) -> RawNodeState {
-        unsafe { (*self.node.get()).link.state().into() }
+        unsafe { (*self.node.get()).link.state() }
     }
 
     #[inline(always)]
@@ -220,14 +199,14 @@ macro_rules! node_data {
     };
 }
 
-pub struct NodeUnqueued<'a, T, S: SyncPrimitives> {
+pub struct NodeUnqueued<'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
     node: NonNull<UnsafePinned<NodeWithData<T>>>,
     queue: &'a Queue<T, S>,
 }
 
 impl<'a, T, S: SyncPrimitives> NodeUnqueued<'a, T, S> {
     #[inline]
-    pub fn enqueue<I: FnOnce(Pin<&mut T>)>(&mut self, init: I) {
+    pub fn enqueue<I: FnOnce(Pin<&mut T>)>(mut self, init: I) {
         init(self.data_pinned());
         #[cfg(feature = "queue-state")]
         let new_tail = |tail| Some((StateOrTail::Tail(self.node.cast()).into(), Some(tail)));
@@ -241,7 +220,7 @@ impl<'a, T, S: SyncPrimitives> NodeUnqueued<'a, T, S> {
         F: FnMut(QueueState) -> Option<QueueState>,
         I: FnMut(Option<QueueState>, Pin<&mut T>) -> bool,
     >(
-        &mut self,
+        self,
         mut f: F,
         mut init: I,
     ) -> Result<(), Option<QueueState>> {
@@ -272,7 +251,7 @@ impl<'a, T, S: SyncPrimitives> NodeUnqueued<'a, T, S> {
 
 node_data!(NodeUnqueued);
 
-pub struct NodeQueued<'a, T, S: SyncPrimitives> {
+pub struct NodeQueued<'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
     node: NonNull<UnsafePinned<NodeWithData<T>>>,
     locked: LockedQueue<'a, T, S>,
 }
@@ -299,7 +278,7 @@ impl<'a, T, S: SyncPrimitives> NodeQueued<'a, T, S> {
 
 node_data!(NodeQueued);
 
-pub struct NodeDequeued<'a, T, S: SyncPrimitives> {
+pub struct NodeDequeued<'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
     node: NonNull<UnsafePinned<NodeWithData<T>>>,
     _queue: PhantomData<&'a Queue<T, S>>,
 }

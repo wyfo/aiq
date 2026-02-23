@@ -10,14 +10,11 @@ use core::{
 use crate::queue::state::*;
 use crate::{
     Queue,
-    queue::{
-        LockedQueue, NodeLink,
-        node::{NodeLinkState, NodeWithData},
-    },
-    sync::SyncPrimitives,
+    queue::{LockedQueue, NodeLink, node::NodeWithData},
+    sync::{DefaultSyncPrimitives, SyncPrimitives},
 };
 
-pub struct Drain<'a, T, S: SyncPrimitives + 'a> {
+pub struct Drain<'a, T, S: SyncPrimitives + 'a = DefaultSyncPrimitives> {
     sentinel_node: NodeLink,
     queue: &'a Queue<T, S>,
     locked: Option<LockedQueue<'a, T, S>>,
@@ -26,15 +23,15 @@ pub struct Drain<'a, T, S: SyncPrimitives + 'a> {
 impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
     pub(super) fn new(mut locked: LockedQueue<'a, T, S>, new_tail: *mut NodeLink) -> Self {
         let mut sentinel_node = NodeLink::new();
-        if let Some(tail) =
-            (locked.tail()).and_then(|_| NonNull::new(locked.tail.swap(new_tail, SeqCst)))
-        {
-            #[cfg(feature = "queue-state")]
-            let StateOrTail::Tail(tail) = tail.as_ptr().into() else {
-                unsafe { core::hint::unreachable_unchecked() };
-            };
-            sentinel_node.prev.set(tail);
+        if locked.tail().is_some() {
             *sentinel_node.next.get_mut() = locked.get_next(&locked.queue.head_sentinel).as_ptr();
+            let tail = locked.tail.swap(new_tail, SeqCst);
+            #[cfg(feature = "queue-state")]
+            let tail = match tail.into() {
+                StateOrTail::Tail(t) => t.as_ptr(),
+                _ => unsafe { core::hint::unreachable_unchecked() },
+            };
+            sentinel_node.prev.store(tail, Relaxed);
         }
         Self {
             sentinel_node,
@@ -57,15 +54,19 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
 
     pub fn execute_unlocked<F: FnOnce() -> R, R>(self: Pin<&mut Self>, f: F) -> R {
         let this = unsafe { self.get_unchecked_mut() };
-        let sentinel_ptr = NonNull::from(&this.sentinel_node);
+        let sentinel_ptr = ptr::from_ref(&this.sentinel_node).cast_mut();
         if let Some(next) = NonNull::new(*this.sentinel_node.next.get_mut()) {
-            unsafe { next.as_ref().prev.set(sentinel_ptr) };
-            (this.sentinel_node.prev().next).store(sentinel_ptr.as_ptr(), Relaxed);
+            unsafe { next.as_ref().prev.store(sentinel_ptr, Relaxed) }
+            (this.sentinel_node.prev().next).store(sentinel_ptr, Relaxed);
         }
         drop(unsafe { this.locked.take().unwrap_unchecked() });
         let res = f();
         this.locked = Some(this.queue.lock());
-        if this.sentinel_node.prev.get() == sentinel_ptr {
+        if *this.sentinel_node.next.get_mut() == sentinel_ptr {
+            debug_assert_eq!(
+                *this.sentinel_node.next.get_mut(),
+                *this.sentinel_node.prev.get_mut(),
+            );
             *this.sentinel_node.next.get_mut() = ptr::null_mut();
         }
         res
@@ -79,21 +80,21 @@ impl<'a, T, S: SyncPrimitives> Drop for Drain<'a, T, S> {
     }
 }
 
-pub struct NodeDrained<'drain, 'a, T, S: SyncPrimitives> {
+pub struct NodeDrained<'drain, 'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
     node: NonNull<NodeLink>,
     drain: &'a mut Drain<'drain, T, S>,
 }
 
 impl<T, S: SyncPrimitives> Drop for NodeDrained<'_, '_, T, S> {
     fn drop(&mut self) {
-        let next = if self.node == self.drain.sentinel_node.prev.get() {
+        let next = if self.node == self.drain.sentinel_node.prev().into() {
             ptr::null_mut()
         } else {
             let locked = unsafe { self.drain.locked.as_mut().unwrap_unchecked() };
             unsafe { locked.get_next(self.node.as_ref()).as_ptr() }
         };
         *self.drain.sentinel_node.next.get_mut() = next;
-        unsafe { (self.node.as_ref().state).store(NodeLinkState::Dequeued as _, Release) };
+        unsafe { self.node.as_ref().dequeue() }
     }
 }
 

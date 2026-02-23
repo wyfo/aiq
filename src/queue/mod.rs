@@ -55,6 +55,7 @@ impl<T, S: SyncPrimitives> QueueRef for std::sync::Arc<Queue<T, S>> {
 pub struct Queue<T, S: SyncPrimitives = DefaultSyncPrimitives> {
     tail: AtomicPtr<NodeLink>,
     head_sentinel: NodeLink,
+    parked_node: AtomicPtr<NodeLink>,
     _padding: crossbeam_utils::CachePadded<()>,
     mutex: S::Mutex,
     parker: S::Parker,
@@ -69,6 +70,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         Self {
             tail: AtomicPtr::new(tail),
             head_sentinel: NodeLink::new(),
+            parked_node: AtomicPtr::new(ptr::null_mut()),
             _padding: crossbeam_utils::CachePadded::new(()),
             mutex: S::Mutex::INIT,
             parker: S::Parker::INIT,
@@ -159,22 +161,20 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         let mut tail = self.tail.load(Relaxed);
         let prev = loop {
             let Some((new_tail, prev)) = new_tail(tail) else {
+                unsafe { node.as_ref().prev.store(ptr::null_mut(), Relaxed) }
                 return Some(tail);
             };
             let prev =
-                prev.map(|p| NonNull::new(p).unwrap_or_else(|| NonNull::from(&self.head_sentinel)));
-            if let Some(prev) = prev {
-                unsafe { node.as_ref() }.prev.set(prev);
-            }
+                prev.map(|p| NonNull::new(p).unwrap_or_else(|| (&self.head_sentinel).into()));
+            let prev_ptr = prev.map_or(ptr::null_mut(), NonNull::as_ptr);
+            unsafe { node.as_ref().prev.store(prev_ptr, Relaxed) }
             match (self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Relaxed) {
-                Ok(_) if prev.is_none() => return None,
-                Ok(_) => break unsafe { prev.unwrap().as_ref() },
+                Ok(_) => break prev?,
                 Err(ptr) => tail = ptr,
             }
         };
-        (unsafe { node.as_ref() }.state).store(NodeLinkState::Queued as _, Relaxed);
-        prev.next.store(node.as_ptr().cast(), SeqCst);
-        if prev.state() == NodeLinkState::Parked {
+        unsafe { prev.as_ref().next.store(node.as_ptr().cast(), SeqCst) };
+        if self.parked_node.load(SeqCst) == prev.as_ptr() {
             self.unpark();
         }
         Some(tail)
@@ -206,11 +206,13 @@ pub struct LockedQueue<'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
 
 impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
     #[cfg(not(feature = "queue-state"))]
+    #[inline(always)]
     fn tail(&self) -> Option<NonNull<NodeLink>> {
         NonNull::new(self.queue.tail.load(SeqCst))
     }
 
     #[cfg(feature = "queue-state")]
+    #[inline(always)]
     fn tail(&self) -> Option<NonNull<NodeLink>> {
         match self.queue.tail.load(SeqCst).into() {
             StateOrTail::Tail(tail) => Some(tail),
@@ -218,6 +220,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
         }
     }
 
+    #[inline(always)]
     fn get_next(&mut self, node: &NodeLink) -> NonNull<NodeLink> {
         if let Some(next) = node.next() {
             return next;
@@ -234,10 +237,11 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
                 return next;
             }
         }
-        node.state.store(NodeLinkState::Parked as _, SeqCst);
+        let node_ptr = ptr::from_ref(node).cast_mut();
+        self.parked_node.store(node_ptr, SeqCst);
         loop {
             if let Some(next) = node.next() {
-                node.state.store(NodeLinkState::Queued as _, Relaxed);
+                self.parked_node.store(ptr::null_mut(), SeqCst);
                 return next;
             }
             unsafe { self.parker.park() };
@@ -246,6 +250,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
 
     #[inline]
     pub fn dequeue(&mut self) -> Option<NodeDequeuing<'a, '_, T, S>> {
+        self.tail()?;
         let node = self.get_next(&self.queue.head_sentinel);
         Some(NodeDequeuing { node, locked: self })
     }
@@ -271,7 +276,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
         node: &NodeLink,
         reset_tail: impl FnOnce() -> *mut NodeLink,
     ) -> bool {
-        if let Some(next) = NonNull::new(node.next.load(Acquire)) {
+        if let Some(next) = node.next() {
             node.unlink(next);
             return false;
         }
@@ -281,9 +286,9 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             (reset_tail(), true)
         } else {
             #[cfg(not(feature = "queue-state"))]
-            let new_tail = node.prev.get().as_ptr();
+            let new_tail = node.prev.load(Relaxed);
             #[cfg(feature = "queue-state")]
-            let new_tail = StateOrTail::Tail(node.prev.get()).into();
+            let new_tail = StateOrTail::Tail(node.prev().into()).into();
             (new_tail, false)
         };
         #[cfg(not(feature = "queue-state"))]
@@ -297,7 +302,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             node.unlink(self.get_next(node));
             return false;
         }
-        node.state.store(NodeLinkState::Dequeued as _, Release);
+        node.dequeue();
         empty
     }
 }
@@ -317,7 +322,7 @@ impl<T, S: SyncPrimitives> Deref for LockedQueue<'_, T, S> {
     }
 }
 
-pub struct NodeDequeuing<'locked, 'a, T, S: SyncPrimitives> {
+pub struct NodeDequeuing<'locked, 'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
     node: NonNull<NodeLink>,
     locked: &'a mut LockedQueue<'locked, T, S>,
 }

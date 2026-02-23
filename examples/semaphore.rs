@@ -200,17 +200,12 @@ impl Semaphore {
                     }
                     drop(waiter);
                     if wakers.is_full() {
-                        drain.as_mut().execute_unlocked(|| {
-                            for waker in wakers.drain(..) {
-                                waker.wake();
-                            }
-                        });
+                        (drain.as_mut())
+                            .execute_unlocked(|| wakers.drain(..).for_each(Waker::wake));
                     }
                 }
             }
-            for waker in wakers {
-                waker.wake();
-            }
+            wakers.into_iter().for_each(Waker::wake);
         }
     }
 
@@ -260,7 +255,7 @@ impl<'a> Acquire<'a> {
         let this = self.project();
         let (state, semaphore) = this.node.state_and_queue();
         match state {
-            NodeState::Unqueued(mut waiter) => {
+            NodeState::Unqueued(waiter) => {
                 match waiter.fetch_update_queue_state_or_enqueue(
                     |state| {
                         if state & CLOSED != 0 {
