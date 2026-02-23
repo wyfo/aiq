@@ -1,8 +1,7 @@
 #![cfg(not(miri))]
 #[allow(dead_code)]
-mod semaphore {
-    include!("../examples/semaphore.rs");
-}
+#[path = "../examples/semaphore.rs"]
+mod semaphore;
 
 use std::sync::Arc;
 

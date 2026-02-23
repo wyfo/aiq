@@ -1,8 +1,7 @@
 #![cfg(not(miri))]
 #[allow(dead_code)]
-mod notify {
-    include!("../examples/notify.rs");
-}
+#[path = "../examples/notify.rs"]
+mod notify;
 
 use notify::Notify;
 use tokio_test::{task::spawn, *};

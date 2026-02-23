@@ -1,8 +1,7 @@
 #![cfg(not(miri))]
 #[allow(dead_code)]
-mod mutex {
-    include!("../examples/mutex.rs");
-}
+#[path = "../examples/mutex.rs"]
+mod mutex;
 
 use std::sync::Arc;
 

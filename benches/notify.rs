@@ -1,7 +1,6 @@
 #[allow(dead_code)]
-mod notify {
-    include!("../examples/notify.rs");
-}
+#[path = "../examples/notify.rs"]
+mod notify;
 
 use std::sync::{
     Arc,
