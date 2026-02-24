@@ -5,7 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering::SeqCst},
     },
-    task::{Context, Poll, Waker},
+    task::{Context, Poll, Waker, ready},
 };
 
 use aiq::{
@@ -146,34 +146,53 @@ pin_project! {
     impl<N: Deref<Target = Notify>> PinnedDrop for NotifiedInner<N> {
         fn drop(mut this: Pin<&mut Self>) {
             if !this.completed {
-               NotifiedInner::cancel(this.project().node);
+               this.cancel();
             }
         }
     }
 }
 
 impl<N: Deref<Target = Notify>> NotifiedInner<N> {
-    fn poll_notified(self: Pin<&mut Self>, cx: Option<&mut Context<'_>>) -> Poll<()> {
+    fn poll_notified(mut self: Pin<&mut Self>, cx: Option<&mut Context<'_>>) -> Poll<()> {
+        if ready!(self.as_mut().poll_notified_impl(cx)) {
+            self.as_mut().cancel();
+        }
+        *self.project().completed = true;
+        Poll::Ready(())
+    }
+
+    #[inline(always)]
+    fn poll_notified_impl(self: Pin<&mut Self>, cx: Option<&mut Context<'_>>) -> Poll<bool> {
         let mut this = self.project();
-        let mut enqueued = false;
         match this.node.as_mut().state() {
             NodeState::Unqueued(waiter) => {
-                enqueued = waiter
-                    .fetch_update_queue_state_or_enqueue(
-                        |state| (state == STATE_NOTIFIED).then_some(STATE_UNNOTIFIED),
-                        |_, mut waiter| {
-                            if let Some(cx) = cx.as_ref() {
-                                waiter.waker.get_or_insert_with(|| cx.waker().clone());
-                            }
-                            true
-                        },
-                    )
-                    .is_err();
+                let notify = waiter.queue();
+                let mut enqueued = true;
+                match waiter.fetch_update_queue_state_or_enqueue(
+                    |state| (state == STATE_NOTIFIED).then_some(STATE_UNNOTIFIED),
+                    |_, mut waiter| {
+                        if notify.0.generation.load(SeqCst) != *this.generation {
+                            enqueued = false;
+                            return false;
+                        }
+                        if let Some(cx) = cx.as_ref() {
+                            waiter.waker.get_or_insert_with(|| cx.waker().clone());
+                        }
+                        true
+                    },
+                ) {
+                    Ok(_) => Poll::Ready(false),
+                    Err(_) if !enqueued || notify.0.generation.load(SeqCst) != *this.generation => {
+                        Poll::Ready(enqueued)
+                    }
+                    Err(_) => Poll::Pending,
+                }
             }
             NodeState::Queued(waiter)
                 if waiter.queue().0.generation.load(SeqCst) != *this.generation =>
             {
                 waiter.dequeue_try_set_queue_state(STATE_UNNOTIFIED).ok();
+                Poll::Ready(false)
             }
             NodeState::Queued(mut waiter) => {
                 if let Some(cx) = cx
@@ -181,24 +200,15 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
                 {
                     waiter.waker = Some(cx.waker().clone());
                 }
-                return Poll::Pending;
+                Poll::Pending
             }
-            NodeState::Dequeued(_) => {}
+            NodeState::Dequeued(_) => Poll::Ready(false),
         }
-        if enqueued {
-            if this.node.queue().0.generation.load(SeqCst) == *this.generation {
-                return Poll::Pending;
-            } else {
-                Self::cancel(this.node);
-            }
-        }
-        *this.completed = true;
-        Poll::Ready(())
     }
 
     #[cold]
-    fn cancel(node: Pin<&mut Node<NotifyRef<N>>>) {
-        match node.state() {
+    fn cancel(self: Pin<&mut Self>) {
+        match self.project().node.state() {
             NodeState::Unqueued(_) => {}
             NodeState::Queued(waiter) => {
                 waiter.dequeue_try_set_queue_state(STATE_UNNOTIFIED).ok();

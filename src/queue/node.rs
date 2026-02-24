@@ -148,8 +148,8 @@ impl<Q: QueueRef> Drop for Node<Q> {
 
 macro_rules! node_getters {
     ($node:ident) => {
-        impl<Q: QueueRef> $node<'_, Q> {
-            pub fn queue(&self) -> &Q {
+        impl<'a, Q: QueueRef> $node<'a, Q> {
+            pub fn queue(&self) -> &'a Q {
                 self.queue
             }
 
