@@ -199,6 +199,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         mut new_tail: impl FnMut(*mut NodeLink) -> Option<(*mut NodeLink, Option<*mut NodeLink>)>,
     ) -> Option<*mut NodeLink> {
         let mut tail = self.tail.load(Relaxed);
+        let backoff = crossbeam_utils::Backoff::new();
         let prev = loop {
             let Some((new_tail, prev)) = new_tail(tail) else {
                 atomic::fence(Acquire);
@@ -211,8 +212,9 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
             unsafe { node.as_ref().prev.store(prev_ptr, Relaxed) }
             match (self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Relaxed) {
                 Ok(_) => break prev?,
-                Err(ptr) => tail = ptr,
+                Err(_) => backoff.spin(),
             }
+            tail = self.tail.load(Relaxed);
         };
         unsafe { prev.as_ref().next.store(node.as_ptr().cast(), SeqCst) };
         if self.parked_node.load(SeqCst) == prev.as_ptr() {
