@@ -29,10 +29,6 @@ tokio-test = "0.4.5"
 test = false
 
 [[example]]
-name = "mutex"
-required-features = ["queue-state"]
-
-[[example]]
 name = "notify"
 required-features = ["queue-state"]
 
@@ -46,14 +42,6 @@ required-features = ["queue-state"]
 
 [[test]]
 name = "miri_semaphore"
-required-features = ["queue-state"]
-
-[[test]]
-name = "mutex"
-required-features = ["queue-state"]
-
-[[test]]
-name = "mutex_owned"
 required-features = ["queue-state"]
 
 [[test]]
