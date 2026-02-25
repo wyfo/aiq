@@ -69,7 +69,7 @@ impl Semaphore {
                 }
                 n -= waiter.permits as usize;
                 wakers.push(waiter.waker.take().unwrap());
-                if waiter.try_set_queue_state(n << PERMIT_SHIFT) {
+                if waiter.try_set_queue_state(n << PERMIT_SHIFT) || n == 0 {
                     break 'outer;
                 } else if wakers.is_full() {
                     break;
