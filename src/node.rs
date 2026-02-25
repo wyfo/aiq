@@ -129,12 +129,22 @@ impl<Q: QueueRef> Node<Q> {
             RawNodeState::Dequeued => NodeState::Dequeued(NodeDequeued { node, queue }),
         }
     }
+
+    #[cold]
+    #[inline(never)]
+    fn dequeue(&mut self) {
+        let mut locked = self.queue.queue().lock();
+        if self.raw_state() == RawNodeState::Queued {
+            unsafe { locked.remove(&(*self.node.get()).link, ptr::null_mut()) };
+        }
+    }
 }
 
 impl<Q: QueueRef> Drop for Node<Q> {
+    #[inline(always)]
     fn drop(&mut self) {
-        if let NodeState::Queued(queued) = self.state_impl() {
-            queued.dequeue();
+        if self.raw_state() == RawNodeState::Queued {
+            self.dequeue()
         }
     }
 }
