@@ -24,9 +24,9 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
     pub(super) fn new(mut locked: LockedQueue<'a, T, S>, new_tail: *mut NodeLink) -> Self {
         let mut sentinel_node = NodeLink::new();
         if locked.tail().is_some() {
-            *sentinel_node.next.get_mut() = locked.get_next(&locked.queue.head_sentinel).as_ptr();
-            unsafe { *locked.queue.head_sentinel.next.as_ptr() = ptr::null_mut() };
-            let tail = locked.tail.swap(new_tail, SeqCst);
+            *sentinel_node.next.get_mut() = locked.get_next(&locked.queue.sentinel).as_ptr();
+            unsafe { *locked.sentinel.next.as_ptr() = ptr::null_mut() };
+            let tail = locked.sentinel.prev.swap(new_tail, SeqCst);
             #[cfg(feature = "queue-state")]
             let tail = match tail.into() {
                 StateOrTail::Tail(t) => t.as_ptr(),
