@@ -14,7 +14,6 @@ std = []
 [dependencies]
 atomic-wait = { version = "1.1.0", optional = true }
 cfg-if = "1"
-crossbeam-utils = "0.8"
 lock_api = { version = "0.4", optional = true }
 parking_lot = { version = "0.12", optional = true }
 

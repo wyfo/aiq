@@ -3,6 +3,7 @@ extern crate std;
 
 use core::{
     hint,
+    hint::spin_loop,
     marker::PhantomData,
     mem,
     mem::ManuallyDrop,
@@ -59,7 +60,6 @@ pub struct Queue<T, S: SyncPrimitives = DefaultSyncPrimitives> {
     tail: AtomicPtr<NodeLink>,
     head_sentinel: NodeLink,
     parked_node: AtomicPtr<NodeLink>,
-    _padding: crossbeam_utils::CachePadded<()>,
     mutex: S::Mutex,
     parker: S::Parker,
     _phantom: PhantomData<T>,
@@ -74,7 +74,6 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
             tail: AtomicPtr::new(tail),
             head_sentinel: NodeLink::new(),
             parked_node: AtomicPtr::new(ptr::null_mut()),
-            _padding: crossbeam_utils::CachePadded::new(()),
             mutex: S::Mutex::INIT,
             parker: S::Parker::INIT,
             _phantom: PhantomData,
@@ -195,8 +194,16 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         node: NonNull<NodeLink>,
         mut new_tail: impl FnMut(*mut NodeLink) -> Option<(*mut NodeLink, Option<*mut NodeLink>)>,
     ) -> Option<*mut NodeLink> {
+        let mut backoff = 0;
+        #[cold]
+        #[inline(never)]
+        fn spin(backoff: usize) -> usize {
+            for _ in 0..1 << backoff {
+                spin_loop();
+            }
+            backoff + if backoff < 6 { 1 } else { 0 }
+        }
         let mut tail = self.tail.load(Relaxed);
-        let backoff = crossbeam_utils::Backoff::new();
         let prev = loop {
             let Some((new_tail, prev)) = new_tail(tail) else {
                 atomic::fence(Acquire);
@@ -210,7 +217,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
             if ((self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Relaxed)).is_ok() {
                 break prev?;
             }
-            backoff.spin();
+            backoff = spin(backoff);
             tail = self.tail.load(Relaxed);
         };
         unsafe { prev.as_ref().next.store(node.as_ptr().cast(), SeqCst) };
