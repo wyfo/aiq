@@ -33,7 +33,7 @@ type MutexGuard<'a, S> = <<S as SyncPrimitives>::Mutex as Mutex>::Guard<'a>;
 
 /// # Safety
 ///
-/// Every [`Self::queue`] call must return a reference to the same queue.
+/// For a given instance, [`Self::queue`] must always return a reference to the same queue.
 pub unsafe trait QueueRef {
     type NodeData;
     type SyncPrimitives: SyncPrimitives;
