@@ -53,13 +53,6 @@ impl NodeLink {
             _ => unreachable!(),
         }
     }
-
-    #[inline(always)]
-    pub(crate) fn unlink(&self, next: NonNull<NodeLink>) {
-        unsafe { next.as_ref().prev.store(self.prev.load(Relaxed), Relaxed) };
-        self.prev().next.store(next.as_ptr(), Relaxed);
-        self.dequeue();
-    }
 }
 
 #[repr(C)]
