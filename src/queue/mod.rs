@@ -31,14 +31,17 @@ pub use state::*;
 
 type MutexGuard<'a, S> = <<S as SyncPrimitives>::Mutex as Mutex>::Guard<'a>;
 
-pub trait QueueRef {
+/// # Safety
+///
+/// Every [`Self::queue`] call must return a reference to the same queue.
+pub unsafe trait QueueRef {
     type NodeData;
     type SyncPrimitives: SyncPrimitives;
 
     fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives>;
 }
 
-impl<T, S: SyncPrimitives> QueueRef for &Queue<T, S> {
+unsafe impl<T, S: SyncPrimitives> QueueRef for &Queue<T, S> {
     type NodeData = T;
     type SyncPrimitives = S;
     fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives> {
@@ -47,12 +50,42 @@ impl<T, S: SyncPrimitives> QueueRef for &Queue<T, S> {
 }
 
 #[cfg(feature = "std")]
-impl<T, S: SyncPrimitives> QueueRef for std::sync::Arc<Queue<T, S>> {
+unsafe impl<T, S: SyncPrimitives> QueueRef for std::sync::Arc<Queue<T, S>> {
     type NodeData = T;
     type SyncPrimitives = S;
     fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives> {
         self
     }
+}
+
+#[macro_export]
+macro_rules! queue_ref {
+    (
+        $ty:ident$(<$($lf:lifetime)? $(,)? $($arg:ident $(: $bound:path)?)? $(,)?>)?,
+        NodeData = $data:ty,
+        $(SyncPrimitives = $sync:ty,)?
+        &self $(.$field:tt)+
+    ) => {
+        unsafe impl $(<
+            $($lf,)?
+            $($arg $(: $bound)?)?
+        >)? $crate::queue::QueueRef for $ty $(<$($lf,)? $($arg,)?>)? {
+            type NodeData = $data;
+            type SyncPrimitives = $crate::__private_queue_ref!(@sync $($sync)?);
+            fn queue(&self) -> &$crate::Queue<Self::NodeData, Self::SyncPrimitives> {
+                &self $(.$field)+
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __private_queue_ref {
+    (@lifetime '_,) => {};
+    (@lifetime $lf:lifetime,) => { $lf, };
+    (@sync) => { $crate::sync::DefaultSyncPrimitives };
+    (@sync $ty:ty) => { $ty };
 }
 
 #[repr(C)]

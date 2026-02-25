@@ -10,8 +10,8 @@ use std::{
 
 use aiq::{
     Node, NodeState, Queue,
-    queue::{LockedQueue, QueueRef, QueueState},
-    sync::DefaultSyncPrimitives,
+    queue::{LockedQueue, QueueState},
+    queue_ref,
 };
 use arrayvec::ArrayVec;
 use pin_project_lite::pin_project;
@@ -126,14 +126,7 @@ impl Notify {
 }
 
 struct NotifyRef<N>(N);
-
-impl<N: Deref<Target = Notify>> QueueRef for NotifyRef<N> {
-    type NodeData = Waiter;
-    type SyncPrimitives = DefaultSyncPrimitives;
-    fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives> {
-        &self.0.queue
-    }
-}
+queue_ref!(NotifyRef<N: Deref<Target = Notify>>, NodeData = Waiter, &self.0.queue);
 
 pin_project! {
     struct NotifiedInner<N: Deref<Target = Notify>> {

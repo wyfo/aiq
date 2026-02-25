@@ -8,8 +8,8 @@ use std::{
 
 use aiq::{
     Node, NodeState, Queue,
-    queue::{LockedQueue, QueueRef, QueueState},
-    sync::DefaultSyncPrimitives,
+    queue::{LockedQueue, QueueState},
+    queue_ref,
 };
 use arrayvec::ArrayVec;
 use pin_project_lite::pin_project;
@@ -208,14 +208,7 @@ impl Semaphore {
 }
 
 struct SemaphoreRef<'a>(&'a Semaphore);
-
-impl QueueRef for SemaphoreRef<'_> {
-    type NodeData = Waiter;
-    type SyncPrimitives = DefaultSyncPrimitives;
-    fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives> {
-        &self.0.0
-    }
-}
+queue_ref!(SemaphoreRef<'a>, NodeData = Waiter, &self.0.0);
 
 #[derive(Debug)]
 pub struct AcquireError(());
