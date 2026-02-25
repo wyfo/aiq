@@ -342,10 +342,16 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
         #[cfg(not(target_arch = "x86_64"))]
         self.parked_node.store(next_ptr, SeqCst);
         loop {
+            #[cfg(not(target_arch = "x86_64"))]
             if let Some(next) = NonNull::new(next.load(SeqCst)) {
-                #[cfg(not(target_arch = "x86_64"))]
                 self.parked_node.store(ptr::null_mut(), SeqCst);
                 return next;
+            }
+            #[cfg(target_arch = "x86_64")]
+            let next = next.load(SeqCst);
+            #[cfg(target_arch = "x86_64")]
+            if next.addr() != 1 {
+                return unsafe { NonNull::new_unchecked(next) };
             }
             unsafe { self.parker.park() };
         }
