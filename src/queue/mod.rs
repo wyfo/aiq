@@ -19,14 +19,14 @@ use core::{
 use crate::sync::{DefaultSyncPrimitives, SyncPrimitives, mutex::Mutex, parker::Parker};
 
 mod drain;
-mod node;
 #[cfg(feature = "queue-state")]
-mod state;
+pub(crate) mod state;
 
 pub use drain::*;
-pub use node::*;
 #[cfg(feature = "queue-state")]
 pub use state::*;
+
+use crate::node::{NodeLink, NodeWithData};
 
 type MutexGuard<'a, S> = <<S as SyncPrimitives>::Mutex as Mutex>::Guard<'a>;
 
@@ -191,7 +191,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         }
     }
 
-    unsafe fn enqueue(
+    pub(crate) unsafe fn enqueue(
         &self,
         node: NonNull<NodeLink>,
         mut new_tail: impl FnMut(*mut NodeLink) -> Option<(*mut NodeLink, Option<*mut NodeLink>)>,
@@ -336,7 +336,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
         Drain::new(self, StateOrTail::State(state).into())
     }
 
-    unsafe fn remove(&mut self, node: &NodeLink, new_tail: *mut NodeLink) -> bool {
+    pub(crate) unsafe fn remove(&mut self, node: &NodeLink, new_tail: *mut NodeLink) -> bool {
         if let Some(next) = node.next() {
             node.unlink(next);
             return false;

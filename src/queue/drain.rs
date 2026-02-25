@@ -10,7 +10,8 @@ use core::{
 use crate::queue::state::*;
 use crate::{
     Queue,
-    queue::{LockedQueue, NodeLink, node::NodeWithData},
+    node::NodeWithData,
+    queue::{LockedQueue, NodeLink},
     sync::{DefaultSyncPrimitives, SyncPrimitives},
 };
 

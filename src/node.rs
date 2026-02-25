@@ -16,13 +16,13 @@ use crate::queue::{LockedQueue, QueueRef};
 use crate::unsafe_pinned::UnsafePinned;
 
 #[repr(C)]
-pub(super) struct NodeLink {
-    pub(super) prev: AtomicPtr<NodeLink>,
-    pub(super) next: AtomicPtr<NodeLink>,
+pub(crate) struct NodeLink {
+    pub(crate) prev: AtomicPtr<NodeLink>,
+    pub(crate) next: AtomicPtr<NodeLink>,
 }
 
 impl NodeLink {
-    pub(super) const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             prev: AtomicPtr::new(ptr::null_mut()),
             next: AtomicPtr::new(ptr::null_mut()),
@@ -30,22 +30,22 @@ impl NodeLink {
     }
 
     #[inline(always)]
-    pub(super) fn prev(&self) -> &NodeLink {
+    pub(crate) fn prev(&self) -> &NodeLink {
         unsafe { self.prev.load(Relaxed).as_ref().unwrap_unchecked() }
     }
 
-    pub(super) fn dequeue(&self) {
+    pub(crate) fn dequeue(&self) {
         let dequeued = ptr::without_provenance_mut(RawNodeState::Dequeued as _);
         self.prev.store(dequeued, Release);
     }
 
     #[inline(always)]
-    pub(super) fn next(&self) -> Option<NonNull<NodeLink>> {
+    pub(crate) fn next(&self) -> Option<NonNull<NodeLink>> {
         NonNull::new(self.next.load(SeqCst))
     }
 
     #[inline(always)]
-    pub(super) fn state(&self) -> RawNodeState {
+    pub(crate) fn state(&self) -> RawNodeState {
         match self.prev.load(Acquire).addr().min(2) {
             0 => RawNodeState::Unqueued,
             1 => RawNodeState::Dequeued,
@@ -55,7 +55,7 @@ impl NodeLink {
     }
 
     #[inline(always)]
-    pub(super) fn unlink(&self, next: NonNull<NodeLink>) {
+    pub(crate) fn unlink(&self, next: NonNull<NodeLink>) {
         unsafe { next.as_ref().prev.store(self.prev.load(Relaxed), Relaxed) };
         self.prev().next.store(next.as_ptr(), Relaxed);
         self.dequeue();
@@ -63,9 +63,9 @@ impl NodeLink {
 }
 
 #[repr(C)]
-pub(super) struct NodeWithData<T> {
-    pub(super) link: NodeLink,
-    pub(super) data: T,
+pub(crate) struct NodeWithData<T> {
+    pub(crate) link: NodeLink,
+    pub(crate) data: T,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

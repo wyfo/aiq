@@ -1,15 +1,15 @@
 use core::{ptr, ptr::NonNull};
 
-use crate::queue::node::NodeLink;
+use crate::node::NodeLink;
 
-pub(super) const TAIL_FLAG: usize = 1;
-pub(super) const STATE_SHIFT: usize = 1;
+const TAIL_FLAG: usize = 1;
+const STATE_SHIFT: usize = 1;
 
 pub type QueueState = usize;
 pub const INTRUSIVE_QUEUE_MAX_STATE: QueueState = usize::MAX >> STATE_SHIFT;
 
 #[derive(Debug)]
-pub(super) enum StateOrTail {
+pub(crate) enum StateOrTail {
     State(QueueState),
     Tail(NonNull<NodeLink>),
 }
