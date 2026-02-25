@@ -3,7 +3,6 @@ extern crate std;
 
 use core::{
     hint,
-    hint::spin_loop,
     marker::PhantomData,
     mem,
     mem::ManuallyDrop,
@@ -58,6 +57,7 @@ impl<T, S: SyncPrimitives> QueueRef for std::sync::Arc<Queue<T, S>> {
 #[repr(C)]
 pub struct Queue<T, S: SyncPrimitives = DefaultSyncPrimitives> {
     sentinel: NodeLink,
+    #[cfg(not(target_arch = "x86_64"))]
     parked_node: AtomicPtr<NodeLink>,
     mutex: S::Mutex,
     parker: S::Parker,
@@ -74,6 +74,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
                 prev: AtomicPtr::new(tail),
                 next: AtomicPtr::new(ptr::null_mut()),
             },
+            #[cfg(not(target_arch = "x86_64"))]
             parked_node: AtomicPtr::new(ptr::null_mut()),
             mutex: S::Mutex::INIT,
             parker: S::Parker::INIT,
@@ -200,7 +201,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         #[inline(never)]
         fn spin(backoff: usize) -> usize {
             for _ in 0..1 << backoff {
-                spin_loop();
+                hint::spin_loop();
             }
             backoff + if backoff < 6 { 1 } else { 0 }
         }
@@ -221,9 +222,15 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
             backoff = spin(backoff);
             tail = self.sentinel.prev.load(Relaxed);
         };
-        unsafe { prev.as_ref().next.store(node.as_ptr().cast(), SeqCst) };
+        #[cfg(not(target_arch = "x86_64"))]
+        (unsafe { prev.as_ref() }.next).store(node.as_ptr().cast(), SeqCst);
+        #[cfg(not(target_arch = "x86_64"))]
         if self.parked_node.load(SeqCst) == prev.as_ptr() {
             self.unpark();
+        }
+        #[cfg(target_arch = "x86_64")]
+        if unsafe { !(prev.as_ref().next.swap(node.as_ptr().cast(), SeqCst)).is_null() } {
+            self.unpark()
         }
         Some(tail)
     }
@@ -283,9 +290,20 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             }
         }
         let node_ptr = ptr::from_ref(node).cast_mut();
+        #[cfg(target_arch = "x86_64")]
+        if let Err(next) = (node.next).compare_exchange(
+            ptr::null_mut(),
+            ptr::without_provenance_mut(1),
+            Relaxed,
+            SeqCst,
+        ) {
+            return unsafe { NonNull::new_unchecked(next) };
+        }
+        #[cfg(not(target_arch = "x86_64"))]
         self.parked_node.store(node_ptr, SeqCst);
         loop {
             if let Some(next) = node.next() {
+                #[cfg(not(target_arch = "x86_64"))]
                 self.parked_node.store(ptr::null_mut(), SeqCst);
                 return next;
             }
