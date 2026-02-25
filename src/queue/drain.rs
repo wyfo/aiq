@@ -48,10 +48,19 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
     }
 
     fn next_impl(&mut self) -> Option<NodeDrained<'a, '_, T, S>> {
+        if self.locked.is_none() {
+            self.lock();
+        }
         Some(NodeDrained {
             node: NonNull::new(*self.sentinel_node.next.get_mut())?,
             drain: self,
         })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn lock(&mut self) {
+        self.locked = Some(self.queue.lock());
     }
 
     pub fn execute_unlocked<F: FnOnce() -> R, R>(self: Pin<&mut Self>, f: F) -> R {
