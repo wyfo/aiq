@@ -55,13 +55,17 @@ impl Semaphore {
     }
 
     fn add_permits_locked<'a>(&'a self, mut n: usize, mut locked: LockedQueue<'a, Waiter>) {
+        if n == 0 {
+            return;
+        }
         let mut wakers = ArrayVec::<Waker, 32>::new();
         'outer: loop {
-            while let Some(mut waiter) = locked.dequeue() {
+            loop {
+                let mut waiter = locked.dequeue().unwrap();
                 if waiter.permits as usize > n {
                     waiter.permits -= n as u32;
                     waiter.requeue();
-                    break;
+                    break 'outer;
                 }
                 n -= waiter.permits as usize;
                 wakers.push(waiter.waker.take().unwrap());
@@ -73,7 +77,10 @@ impl Semaphore {
             }
             drop(locked);
             wakers.drain(..).for_each(Waker::wake);
-            locked = self.0.lock();
+            match (self.0).fetch_update_state_or_lock(|state| Self::check_permits(state, n)) {
+                Some(l) => locked = l,
+                None => return,
+            }
         }
         drop(locked);
         wakers.into_iter().for_each(Waker::wake);
