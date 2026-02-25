@@ -72,11 +72,7 @@ unsafe impl Parker for AtomicParker {
         }
         loop {
             atomic_wait::wait(&self.0, Self::PARKED);
-            if self
-                .0
-                .compare_exchange(Self::NOTIFIED, Self::EMPTY, Acquire, Relaxed)
-                .is_ok()
-            {
+            if ((self.0).compare_exchange(Self::NOTIFIED, Self::EMPTY, Acquire, Relaxed)).is_ok() {
                 return;
             }
         }
@@ -121,14 +117,10 @@ unsafe impl Parker for StdParker {
             return;
         }
         let guard = self.mutex.lock().unwrap();
-        *self
-            .condvar
-            .wait_while(guard, |_| {
-                self.state
-                    .compare_exchange(Self::NOTIFIED, Self::EMPTY, Acquire, Relaxed)
-                    .is_err()
-            })
-            .unwrap();
+        let is_notified = |_: &mut _| {
+            ((self.state).compare_exchange(Self::NOTIFIED, Self::EMPTY, Acquire, Relaxed)).is_err()
+        };
+        *self.condvar.wait_while(guard, is_notified).unwrap();
     }
 
     #[inline]

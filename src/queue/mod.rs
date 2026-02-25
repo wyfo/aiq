@@ -121,10 +121,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
                 return Err(Some(state));
             };
             let new_tail = StateOrTail::State(new_state).into();
-            match self
-                .tail
-                .compare_exchange_weak(tail, new_tail, SeqCst, Acquire)
-            {
+            match (self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Acquire) {
                 Ok(_) => return Ok(state),
                 Err(ptr) => tail = ptr,
             }
@@ -210,10 +207,10 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
                 prev.map(|p| NonNull::new(p).unwrap_or_else(|| (&self.head_sentinel).into()));
             let prev_ptr = prev.map_or(ptr::null_mut(), NonNull::as_ptr);
             unsafe { node.as_ref().prev.store(prev_ptr, Relaxed) }
-            match (self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Relaxed) {
-                Ok(_) => break prev?,
-                Err(_) => backoff.spin(),
+            if ((self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Relaxed)).is_ok() {
+                break prev?;
             }
+            backoff.spin();
             tail = self.tail.load(Relaxed);
         };
         unsafe { prev.as_ref().next.store(node.as_ptr().cast(), SeqCst) };
@@ -333,10 +330,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
         let node_ptr = ptr::from_ref(node).cast_mut();
         #[cfg(feature = "queue-state")]
         let node_ptr = StateOrTail::Tail(NonNull::from(node)).into();
-        if (self.queue.tail)
-            .compare_exchange(node_ptr, new_tail, SeqCst, Relaxed)
-            .is_err()
-        {
+        if ((self.queue.tail).compare_exchange(node_ptr, new_tail, SeqCst, Relaxed)).is_err() {
             node.unlink(self.get_next(node));
             return false;
         }
