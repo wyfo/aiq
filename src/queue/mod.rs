@@ -328,19 +328,16 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
                 return next;
             }
         }
-        #[cfg(target_arch = "x86_64")]
-        if let Err(next) = next.compare_exchange(
-            ptr::null_mut(),
-            ptr::without_provenance_mut(1),
-            Relaxed,
-            SeqCst,
-        ) {
-            return unsafe { NonNull::new_unchecked(next) };
-        }
         #[cfg(not(target_arch = "x86_64"))]
         let next_ptr = ptr::from_ref(next).cast_mut();
         #[cfg(not(target_arch = "x86_64"))]
         self.parked_node.store(next_ptr, SeqCst);
+        #[cfg(target_arch = "x86_64")]
+        let parked_ptr = ptr::without_provenance_mut(1);
+        #[cfg(target_arch = "x86_64")]
+        if let Err(next) = next.compare_exchange(ptr::null_mut(), parked_ptr, Relaxed, SeqCst) {
+            return unsafe { NonNull::new_unchecked(next) };
+        }
         loop {
             #[cfg(not(target_arch = "x86_64"))]
             if let Some(next) = NonNull::new(next.load(SeqCst)) {
@@ -350,7 +347,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             #[cfg(target_arch = "x86_64")]
             let next = next.load(SeqCst);
             #[cfg(target_arch = "x86_64")]
-            if next.addr() != 1 {
+            if next != parked_ptr {
                 return unsafe { NonNull::new_unchecked(next) };
             }
             unsafe { self.parker.park() };
