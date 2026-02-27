@@ -1,5 +1,5 @@
-#[cfg(feature = "std")]
-extern crate std;
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
 use core::{
     hint,
@@ -49,8 +49,8 @@ unsafe impl<T, S: SyncPrimitives> QueueRef for &Queue<T, S> {
     }
 }
 
-#[cfg(feature = "std")]
-unsafe impl<T, S: SyncPrimitives> QueueRef for std::sync::Arc<Queue<T, S>> {
+#[cfg(feature = "alloc")]
+unsafe impl<T, S: SyncPrimitives> QueueRef for alloc::sync::Arc<Queue<T, S>> {
     type NodeData = T;
     type SyncPrimitives = S;
     fn queue(&self) -> &Queue<Self::NodeData, Self::SyncPrimitives> {

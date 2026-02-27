@@ -5,11 +5,12 @@ edition = "2024"
 
 [features]
 default = ["std"]
+alloc = []
 atomic-wait = ["dep:atomic-wait"]
 lock_api = ["dep:lock_api"]
 parking_lot = ["dep:parking_lot", "lock_api"]
 queue-state = []
-std = []
+std = ["alloc"]
 
 [dependencies]
 atomic-wait = { version = "1.1.0", optional = true }
