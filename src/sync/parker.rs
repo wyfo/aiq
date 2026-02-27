@@ -4,7 +4,7 @@ extern crate std;
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicBool, Ordering::*};
 #[cfg(feature = "std")]
-use std::sync::{Condvar, Mutex, atomic::AtomicU8};
+use std::sync::{Condvar, Mutex, atomic::AtomicUsize};
 
 /// # Safety
 ///
@@ -89,16 +89,16 @@ unsafe impl Parker for AtomicParker {
 #[cfg(feature = "std")]
 #[derive(Debug)]
 pub struct StdParker {
-    condvar: Condvar,
+    state: AtomicUsize,
     mutex: Mutex<()>,
-    state: AtomicU8,
+    condvar: Condvar,
 }
 
 #[cfg(feature = "std")]
 impl StdParker {
-    const EMPTY: u8 = 0;
-    const NOTIFIED: u8 = 1;
-    const PARKED: u8 = u8::MAX;
+    const EMPTY: usize = 0;
+    const NOTIFIED: usize = 1;
+    const PARKED: usize = usize::MAX;
 }
 
 #[cfg(feature = "std")]
@@ -106,9 +106,9 @@ impl StdParker {
 unsafe impl Parker for StdParker {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self {
-        condvar: Condvar::new(),
+        state: AtomicUsize::new(Self::EMPTY),
         mutex: Mutex::new(()),
-        state: AtomicU8::new(Self::EMPTY),
+        condvar: Condvar::new(),
     };
 
     #[inline]
