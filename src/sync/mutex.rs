@@ -81,12 +81,20 @@ unsafe impl Mutex for StdMutex {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self(std::sync::Mutex::new(()));
     type Guard<'a>
-        = Option<std::sync::MutexGuard<'a, ()>>
+        = std::sync::MutexGuard<'a, ()>
     where
         Self: 'a;
     #[inline]
     fn lock(&self) -> Self::Guard<'_> {
-        self.0.lock().ok()
+        #[cold]
+        #[inline(never)]
+        fn panic_lock() -> ! {
+            panic!("poisoned lock: another task failed inside");
+        }
+        match self.0.lock() {
+            Ok(guard) => guard,
+            Err(_) => panic_lock(),
+        }
     }
     #[inline]
     unsafe fn unlock<'a>(&'a self, guard: Self::Guard<'a>) {
