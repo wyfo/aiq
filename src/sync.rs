@@ -7,6 +7,8 @@ use crate::sync::{
 
 pub mod mutex;
 pub mod parker;
+#[cfg(feature = "pthread")]
+mod pthread;
 
 pub trait SyncPrimitives: Debug {
     type Mutex: Mutex;

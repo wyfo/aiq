@@ -3,6 +3,9 @@ extern crate std;
 
 use core::sync::atomic::{AtomicBool, Ordering::*};
 
+#[cfg(feature = "pthread")]
+pub use crate::sync::pthread::PthreadMutex;
+
 /// # Safety
 ///
 /// Implementations of this trait must ensure that the mutex is actually
@@ -14,7 +17,6 @@ pub unsafe trait Mutex {
     type Guard<'a>
     where
         Self: 'a;
-    #[must_use]
     fn lock(&self) -> Self::Guard<'_>;
     /// # Safety
     ///
@@ -27,6 +29,8 @@ cfg_if::cfg_if! {
         pub type DefaultMutex = parking_lot::RawMutex;
     } else if #[cfg(feature = "std")] {
         pub type DefaultMutex = StdMutex;
+    } else if #[cfg(feature = "pthread")] {
+        pub type DefaultMutex = PthreadMutex;
     } else {
         pub type DefaultMutex = SpinMutex;
     }
