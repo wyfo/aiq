@@ -201,7 +201,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         locked_fallback: L,
     ) {
         if self.fetch_update_state(|s| Some(f(s))).is_err() {
-            self.fetch_update_state_locked(f, locked_fallback)
+            self.fetch_update_state_locked(f, locked_fallback);
         }
     }
 
@@ -269,7 +269,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         }
         #[cfg(target_arch = "x86_64")]
         if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), SeqCst)).is_null() } {
-            self.unpark()
+            self.unpark();
         }
         Some(tail)
     }

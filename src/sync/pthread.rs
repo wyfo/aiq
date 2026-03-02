@@ -111,7 +111,7 @@ unsafe impl Mutex for PthreadMutex {
     }
 
     unsafe fn unlock<'a>(&'a self, _guard: Self::Guard<'a>) {
-        unwrap(unsafe { libc::pthread_mutex_unlock(self.raw()) })
+        unwrap(unsafe { libc::pthread_mutex_unlock(self.raw()) });
     }
 }
 

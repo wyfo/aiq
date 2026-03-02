@@ -121,7 +121,7 @@ fn concurrent_cancel() {
             }
             Poll::Ready(())
         })
-        .await
+        .await;
     }
 
     let semaphore = Arc::new(Semaphore::new(0));
@@ -205,7 +205,7 @@ fn concurrent_permit_updates() {
             semaphore
                 .try_acquire()
                 .expect("try_acquire should succeed")
-                .forget()
+                .forget();
         })
     };
     let t3 = {

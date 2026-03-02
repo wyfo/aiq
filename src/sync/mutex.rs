@@ -53,7 +53,7 @@ unsafe impl Mutex for SpinMutex {
     }
     #[inline]
     unsafe fn unlock<'a>(&'a self, _guard: Self::Guard<'a>) {
-        self.0.store(false, Release)
+        self.0.store(false, Release);
     }
 }
 

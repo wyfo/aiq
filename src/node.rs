@@ -144,7 +144,7 @@ impl<Q: QueueRef> Drop for Node<Q> {
     #[inline(always)]
     fn drop(&mut self) {
         if self.raw_state() == RawNodeState::Queued {
-            self.dequeue()
+            self.dequeue();
         }
     }
 }

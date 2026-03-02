@@ -35,8 +35,8 @@ fn uncontended(g: &mut BenchmarkGroup<WallTime>) {
                     let permit = s.acquire().await;
                     drop(permit);
                 }
-            })
-        })
+            });
+        });
     });
 }
 
@@ -62,8 +62,8 @@ fn uncontended_concurrent_multi(g: &mut BenchmarkGroup<WallTime>) {
                     task::spawn(task(s.clone()))
                 };
                 j.unwrap();
-            })
-        })
+            });
+        });
     });
 }
 
@@ -82,9 +82,9 @@ fn uncontended_concurrent_single(g: &mut BenchmarkGroup<WallTime>) {
                     task(s.clone()),
                     task(s.clone()),
                     task(s.clone())
-                };
-            })
-        })
+                }
+            });
+        });
     });
 }
 
@@ -105,8 +105,8 @@ fn contended_concurrent_multi(g: &mut BenchmarkGroup<WallTime>) {
                     task::spawn(task(s.clone()))
                 };
                 j.unwrap();
-            })
-        })
+            });
+        });
     });
 }
 
@@ -125,9 +125,9 @@ fn contended_concurrent_single(g: &mut BenchmarkGroup<WallTime>) {
                     task(s.clone()),
                     task(s.clone()),
                     task(s.clone())
-                };
-            })
-        })
+                }
+            });
+        });
     });
 }
 

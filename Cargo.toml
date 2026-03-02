@@ -86,6 +86,8 @@ all-features = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(nightly)"] }
+unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 dbg_macro = "warn"
+semicolon_if_nothing_returned = "forbid"

@@ -84,7 +84,7 @@ fn notify_multi() {
             block_on(async {
                 notify.notified().await;
                 notify.notify_one();
-            })
+            });
         }));
     }
 
