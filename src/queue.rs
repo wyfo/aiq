@@ -6,14 +6,22 @@ use core::{
     marker::PhantomData,
     mem,
     mem::ManuallyDrop,
-    ops::{Deref, DerefMut, Not},
-    pin::Pin,
+    ops::{Deref, Not},
     ptr,
     ptr::NonNull,
-    sync::{
-        atomic,
-        atomic::{AtomicPtr, Ordering::*},
-    },
+};
+#[cfg(not(loom))]
+use core::{
+    ops::DerefMut,
+    pin::Pin,
+    sync::atomic,
+    sync::atomic::{AtomicPtr, Ordering::*},
+};
+
+#[cfg(loom)]
+use loom::sync::{
+    atomic,
+    atomic::{AtomicPtr, Ordering::*},
 };
 
 use crate::{
@@ -92,7 +100,7 @@ macro_rules! __private_queue_ref {
 pub struct Queue<T, S: SyncPrimitives = DefaultSyncPrimitives> {
     tail: AtomicPtr<NodeLink>,
     head: AtomicPtr<NodeLink>,
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", loom)))]
     parked_node: AtomicPtr<AtomicPtr<NodeLink>>,
     mutex: S::Mutex,
     parker: S::Parker,
@@ -103,23 +111,32 @@ unsafe impl<T, S: SyncPrimitives> Send for Queue<T, S> {}
 unsafe impl<T, S: SyncPrimitives> Sync for Queue<T, S> {}
 
 impl<T, S: SyncPrimitives> Queue<T, S> {
+    #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     const fn new_impl(tail: *mut NodeLink) -> Self {
         Self {
             tail: AtomicPtr::new(tail),
             head: AtomicPtr::new(ptr::null_mut()),
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(target_arch = "x86_64", loom)))]
             parked_node: AtomicPtr::new(ptr::null_mut()),
+            #[cfg(not(loom))]
             mutex: S::Mutex::INIT,
+            #[cfg(loom)]
+            mutex: S::Mutex::new(),
+            #[cfg(not(loom))]
             parker: S::Parker::INIT,
+            #[cfg(loom)]
+            parker: S::Parker::new(),
             _phantom: PhantomData,
         }
     }
 
+    #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new() -> Self {
         Self::new_impl(ptr::null_mut())
     }
 
+    #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[cfg(feature = "queue-state")]
     #[inline]
     pub const fn with_state(state: QueueState) -> Self {
@@ -129,7 +146,11 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     #[cfg(feature = "queue-state")]
     #[inline]
     pub fn state(&self) -> Option<QueueState> {
-        match self.tail.load(SeqCst).into() {
+        #[cfg(not(loom))]
+        let tail = self.tail.load(SeqCst);
+        #[cfg(loom)]
+        let tail = (self.tail).compare_and_swap(ptr::null_mut(), ptr::null_mut(), SeqCst);
+        match tail.into() {
             StateOrTail::State(state) => Some(state),
             _ => None,
         }
@@ -140,7 +161,13 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         #[cfg(feature = "queue-state")]
         return self.state().is_some();
         #[cfg(not(feature = "queue-state"))]
-        return self.tail.load(SeqCst).is_null();
+        {
+            #[cfg(not(loom))]
+            let tail = self.tail.load(SeqCst);
+            #[cfg(loom)]
+            let tail = (self.tail).compare_and_swap(ptr::null_mut(), ptr::null_mut(), SeqCst);
+            tail.is_null()
+        }
     }
 
     #[cfg(feature = "queue-state")]
@@ -261,13 +288,13 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         } else {
             unsafe { &prev.as_ref().next }
         });
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", loom)))]
         unsafe { prev_next.as_ref() }.store(node.as_ptr().cast(), SeqCst);
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", loom)))]
         if self.parked_node.load(SeqCst) == prev_next.as_ptr() {
             self.unpark();
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", loom))]
         if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), SeqCst)).is_null() } {
             self.unpark();
         }
@@ -301,7 +328,10 @@ pub struct LockedQueue<'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
 impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
     #[inline(always)]
     fn tail(&self) -> Option<NonNull<NodeLink>> {
+        #[cfg(not(loom))]
         let tail = self.tail.load(SeqCst);
+        #[cfg(loom)]
+        let tail = (self.tail).compare_and_swap(ptr::null_mut(), ptr::null_mut(), SeqCst);
         #[cfg(not(feature = "queue-state"))]
         return NonNull::new(tail);
         #[cfg(feature = "queue-state")]
@@ -328,25 +358,25 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
                 return next;
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", loom)))]
         let next_ptr = ptr::from_ref(next).cast_mut();
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", loom)))]
         self.parked_node.store(next_ptr, SeqCst);
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", loom))]
         let parked_ptr = ptr::without_provenance_mut(1);
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", loom))]
         if let Err(next) = next.compare_exchange(ptr::null_mut(), parked_ptr, Relaxed, SeqCst) {
             return unsafe { NonNull::new_unchecked(next) };
         }
         loop {
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(target_arch = "x86_64", loom)))]
             if let Some(next) = NonNull::new(next.load(SeqCst)) {
                 self.parked_node.store(ptr::null_mut(), SeqCst);
                 return next;
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", loom))]
             let next = next.load(SeqCst);
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", loom))]
             if next != parked_ptr {
                 return unsafe { NonNull::new_unchecked(next) };
             }
@@ -435,8 +465,19 @@ pub struct NodeDequeuing<'locked, 'a, T, S: SyncPrimitives = DefaultSyncPrimitiv
 }
 
 impl<T, S: SyncPrimitives> NodeDequeuing<'_, '_, T, S> {
+    #[cfg(not(loom))]
     pub fn data_pinned(&mut self) -> Pin<&mut T> {
         unsafe { Pin::new_unchecked(&mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data) }
+    }
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn with_data<F: FnOnce(&mut T) -> R, R>(&mut self, f: F) -> R {
+        #[cfg(not(loom))]
+        return f(unsafe { &mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data });
+        #[cfg(loom)]
+        return unsafe {
+            ((*self.node.cast::<NodeWithData<T>>().as_ptr()).data).with_mut(|data| f(&mut *data))
+        };
     }
 
     pub fn requeue(self) {
@@ -456,6 +497,7 @@ impl<T, S: SyncPrimitives> Drop for NodeDequeuing<'_, '_, T, S> {
     }
 }
 
+#[cfg(not(loom))]
 impl<T, S: SyncPrimitives> Deref for NodeDequeuing<'_, '_, T, S> {
     type Target = T;
 
@@ -463,6 +505,7 @@ impl<T, S: SyncPrimitives> Deref for NodeDequeuing<'_, '_, T, S> {
         unsafe { &(*self.node.cast::<NodeWithData<T>>().as_ptr()).data }
     }
 }
+#[cfg(not(loom))]
 impl<T: Unpin, S: SyncPrimitives> DerefMut for NodeDequeuing<'_, '_, T, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data }

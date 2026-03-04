@@ -1,10 +1,12 @@
+#[cfg(not(loom))]
 use core::{
     ops::{Deref, DerefMut},
-    pin::Pin,
-    ptr,
-    ptr::NonNull,
-    sync::atomic::Ordering::*,
+    sync::atomic::{AtomicPtr, Ordering::*},
 };
+use core::{pin::Pin, ptr, ptr::NonNull};
+
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicPtr, Ordering::*};
 
 #[cfg(feature = "queue-state")]
 use crate::queue::state::*;
@@ -23,23 +25,40 @@ pub struct Drain<'a, T, S: SyncPrimitives + 'a = DefaultSyncPrimitives> {
 
 impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
     pub(super) fn new(locked: LockedQueue<'a, T, S>, new_tail: *mut NodeLink) -> Self {
-        let mut sentinel_node = NodeLink::new();
+        let mut head = ptr::null_mut();
+        let mut tail = ptr::null_mut();
         if locked.tail().is_some() {
-            *sentinel_node.next.get_mut() = locked.get_next(&locked.queue.head).as_ptr();
-            unsafe { *locked.head.as_ptr() = ptr::null_mut() };
-            let tail = locked.tail.swap(new_tail, SeqCst);
+            head = locked.get_next(&locked.queue.head).as_ptr();
+            locked.head.store(ptr::null_mut(), Relaxed);
+            tail = locked.tail.swap(new_tail, SeqCst);
             #[cfg(feature = "queue-state")]
-            let tail = match tail.into() {
-                StateOrTail::Tail(t) => t.as_ptr(),
+            match tail.into() {
+                StateOrTail::Tail(t) => tail = t.as_ptr(),
                 _ => unsafe { core::hint::unreachable_unchecked() },
             };
-            sentinel_node.prev.store(tail, Relaxed);
         }
         Self {
-            sentinel_node,
+            sentinel_node: NodeLink {
+                prev: AtomicPtr::new(tail),
+                next: AtomicPtr::new(head),
+            },
             queue: locked.queue,
             locked: Some(locked),
         }
+    }
+
+    fn head(&mut self) -> Option<NonNull<NodeLink>> {
+        #[cfg(not(loom))]
+        return NonNull::new(*self.sentinel_node.next.get_mut());
+        #[cfg(loom)]
+        return self.sentinel_node.next.with_mut(|head| NonNull::new(*head));
+    }
+
+    fn set_head(&mut self, head: *mut NodeLink) {
+        #[cfg(not(loom))]
+        let () = *self.sentinel_node.next.get_mut() = head;
+        #[cfg(loom)]
+        self.sentinel_node.next.with_mut(|ptr| *ptr = head);
     }
 
     #[inline]
@@ -52,7 +71,7 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
             self.lock();
         }
         Some(NodeDrained {
-            node: NonNull::new(*self.sentinel_node.next.get_mut())?,
+            node: self.head()?,
             drain: self,
         })
     }
@@ -66,19 +85,20 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
     pub fn execute_unlocked<F: FnOnce() -> R, R>(self: Pin<&mut Self>, f: F) -> R {
         let this = unsafe { self.get_unchecked_mut() };
         let sentinel_ptr = ptr::from_ref(&this.sentinel_node).cast_mut();
-        if let Some(next) = NonNull::new(*this.sentinel_node.next.get_mut()) {
+        if let Some(next) = this.head() {
             unsafe { next.as_ref().prev.store(sentinel_ptr, Relaxed) }
             (this.sentinel_node.prev().next).store(sentinel_ptr, Relaxed);
         }
         drop(unsafe { this.locked.take().unwrap_unchecked() });
         let res = f();
         this.locked = Some(this.queue.lock());
-        if *this.sentinel_node.next.get_mut() == sentinel_ptr {
-            debug_assert_eq!(
-                *this.sentinel_node.next.get_mut(),
-                *this.sentinel_node.prev.get_mut(),
-            );
-            *this.sentinel_node.next.get_mut() = ptr::null_mut();
+        if this.head() == NonNull::new(sentinel_ptr) {
+            #[cfg(not(loom))]
+            let tail = NonNull::new(*this.sentinel_node.prev.get_mut());
+            #[cfg(loom)]
+            let tail = this.sentinel_node.next.with_mut(|tail| NonNull::new(*tail));
+            debug_assert_eq!(this.head(), tail);
+            this.set_head(ptr::null_mut());
         }
         res
     }
@@ -104,17 +124,32 @@ impl<T, S: SyncPrimitives> Drop for NodeDrained<'_, '_, T, S> {
             let locked = unsafe { self.drain.locked.as_mut().unwrap_unchecked() };
             unsafe { locked.get_next(&self.node.as_ref().next).as_ptr() }
         };
-        *self.drain.sentinel_node.next.get_mut() = next;
+        self.drain.set_head(next);
         unsafe { self.node.as_ref().dequeue() }
     }
 }
 
 impl<T, S: SyncPrimitives> NodeDrained<'_, '_, T, S> {
+    #[cfg(not(loom))]
     pub fn data_pinned(&mut self) -> Pin<&mut T> {
         unsafe { Pin::new_unchecked(&mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data) }
     }
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn with_data<F: FnOnce(&mut T) -> R, R>(&mut self, f: F) -> R
+    where
+        T: Unpin,
+    {
+        #[cfg(not(loom))]
+        return f(unsafe { &mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data });
+        #[cfg(loom)]
+        return unsafe {
+            ((*self.node.cast::<NodeWithData<T>>().as_ptr()).data).with_mut(|data| f(&mut *data))
+        };
+    }
 }
 
+#[cfg(not(loom))]
 impl<T, S: SyncPrimitives> Deref for NodeDrained<'_, '_, T, S> {
     type Target = T;
 
@@ -122,6 +157,7 @@ impl<T, S: SyncPrimitives> Deref for NodeDrained<'_, '_, T, S> {
         unsafe { &(*self.node.cast::<NodeWithData<T>>().as_ptr()).data }
     }
 }
+#[cfg(not(loom))]
 impl<T: Unpin, S: SyncPrimitives> DerefMut for NodeDrained<'_, '_, T, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data }

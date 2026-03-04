@@ -3,10 +3,16 @@ extern crate std;
 
 #[cfg(feature = "atomic-wait")]
 use core::sync::atomic::AtomicU32;
+#[cfg(not(loom))]
 use core::sync::atomic::{AtomicBool, Ordering::*};
+#[cfg(not(loom))]
 #[cfg(feature = "std")]
 use std::sync::{Condvar, Mutex, atomic::AtomicUsize};
 
+#[cfg(loom)]
+use loom::sync::{Condvar, Mutex, atomic::AtomicUsize, atomic::Ordering::*};
+
+#[cfg(not(loom))]
 #[cfg(feature = "pthread")]
 pub use crate::sync::pthread::PthreadParker;
 
@@ -19,7 +25,10 @@ pub use crate::sync::pthread::PthreadParker;
 /// [`park`]: Self::park
 /// [`unpark`]: Self::unpark
 pub unsafe trait Parker {
+    #[cfg(not(loom))]
     const INIT: Self;
+    #[cfg(loom)]
+    fn new() -> Self;
     /// # Safety
     ///
     /// `park` can only be called by a single thread at a time.
@@ -27,6 +36,7 @@ pub unsafe trait Parker {
     fn unpark(&self);
 }
 
+#[cfg(not(loom))]
 cfg_if::cfg_if! {
     if #[cfg(feature = "atomic-wait")] {
         pub type DefaultParker = AtomicParker;
@@ -38,8 +48,12 @@ cfg_if::cfg_if! {
         pub type DefaultParker = SpinParker;
     }
 }
+#[cfg(loom)]
+pub type DefaultParker = StdParker;
 
+#[cfg(not(loom))]
 pub struct SpinParker(AtomicBool);
+#[cfg(not(loom))]
 unsafe impl Parker for SpinParker {
     const INIT: Self = Self(AtomicBool::new(false));
     #[inline]
@@ -110,12 +124,21 @@ impl StdParker {
 #[cfg(feature = "std")]
 // SAFETY: implementation inspired for std Parker futex/pthread implementation
 unsafe impl Parker for StdParker {
+    #[cfg(not(loom))]
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self {
         state: AtomicUsize::new(Self::EMPTY),
         mutex: Mutex::new(()),
         condvar: Condvar::new(),
     };
+    #[cfg(loom)]
+    fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(Self::EMPTY),
+            mutex: Mutex::new(()),
+            condvar: Condvar::new(),
+        }
+    }
 
     #[inline]
     unsafe fn park(&self) {
@@ -126,7 +149,14 @@ unsafe impl Parker for StdParker {
         let is_not_notified = |_: &mut _| {
             ((self.state).compare_exchange(Self::NOTIFIED, Self::EMPTY, Acquire, Relaxed)).is_err()
         };
+        #[cfg(not(loom))]
         *self.condvar.wait_while(guard, is_not_notified).unwrap();
+        #[cfg(loom)]
+        let mut guard = guard;
+        #[cfg(loom)]
+        while is_not_notified(&mut *guard) {
+            guard = self.condvar.wait(guard).unwrap();
+        }
     }
 
     #[inline]

@@ -36,6 +36,7 @@ impl Semaphore {
         state + (add << PERMIT_SHIFT)
     }
 
+    #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new(permits: usize) -> Self {
         Self(Queue::with_state(Self::check_permits(0, permits)))
@@ -62,14 +63,19 @@ impl Semaphore {
         'outer: loop {
             loop {
                 let mut waiter = locked.dequeue().unwrap();
-                if waiter.permits as usize > n {
-                    waiter.permits -= n as u32;
+                let requeue = waiter.with_data(|waiter| {
+                    if waiter.permits as usize > n {
+                        waiter.permits -= n as u32;
+                        return true;
+                    }
+                    n -= waiter.permits as usize;
+                    wakers.push(waiter.waker.take().unwrap());
+                    false
+                });
+                if requeue {
                     waiter.requeue();
                     break 'outer;
-                }
-                n -= waiter.permits as usize;
-                wakers.push(waiter.waker.take().unwrap());
-                if waiter.try_set_queue_state(n << PERMIT_SHIFT) || n == 0 {
+                } else if waiter.try_set_queue_state(n << PERMIT_SHIFT) || n == 0 {
                     break 'outer;
                 } else if wakers.is_full() {
                     break;
@@ -187,9 +193,11 @@ impl Semaphore {
                     let Some(mut waiter) = drain.as_mut().next() else {
                         break;
                     };
-                    if let Some(waker) = waiter.waker.take() {
-                        wakers.push(waker);
-                    }
+                    waiter.with_data(|waiter| {
+                        if let Some(waker) = waiter.waker.take() {
+                            wakers.push(waker);
+                        }
+                    });
                     drop(waiter);
                     if wakers.is_full() {
                         (drain.as_mut())
@@ -266,9 +274,11 @@ impl<'a> Acquire<'a> {
                 Poll::Ready(Err(AcquireError(())))
             }
             NodeState::Queued(mut waiter) => {
-                if !waiter.waker.as_ref().unwrap().will_wake(cx.waker()) {
-                    waiter.waker = Some(cx.waker().clone());
-                }
+                waiter.with_data(|waiter| {
+                    if !waiter.waker.as_ref().unwrap().will_wake(cx.waker()) {
+                        waiter.waker = Some(cx.waker().clone());
+                    }
+                });
                 Poll::Pending
             }
             NodeState::Dequeued(waiter) if waiter.queue().0.is_closed() => {
@@ -283,8 +293,8 @@ impl<'a> Acquire<'a> {
         let this = self.project();
         match this.node.state() {
             NodeState::Unqueued(_) => {}
-            NodeState::Queued(waiter) => {
-                let acquired = (*this.permits - waiter.permits) as _;
+            NodeState::Queued(mut waiter) => {
+                let acquired = (*this.permits - waiter.with_data(|w| w.permits)) as _;
                 if let Err((sem, locked)) = waiter.dequeue_try_set_queue_state(acquired) {
                     sem.0.add_permits_locked(acquired, locked);
                 }

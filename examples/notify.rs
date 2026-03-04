@@ -39,6 +39,8 @@ pub struct Notify {
 }
 
 impl Notify {
+    #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
+    #[inline]
     pub const fn new() -> Self {
         Self {
             queue: Queue::with_state(STATE_UNNOTIFIED),
@@ -60,8 +62,10 @@ impl Notify {
             Notification::Last => locked.pop().unwrap(),
             _ => unreachable!(),
         };
-        waiter.notification = Some(notification);
-        let waker = waiter.waker.take();
+        let waker = waiter.with_data(|waiter| {
+            waiter.notification = Some(notification);
+            waiter.waker.take()
+        });
         waiter.try_set_queue_state(STATE_UNNOTIFIED);
         drop(locked);
         if let Some(waker) = waker {
@@ -89,8 +93,10 @@ impl Notify {
                 let Some(mut waiter) = drain.as_mut().next() else {
                     break;
                 };
-                waiter.notification = Some(Notification::All);
-                if let Some(waker) = waiter.waker.take() {
+                if let Some(waker) = waiter.with_data(|waiter| {
+                    waiter.notification = Some(Notification::All);
+                    waiter.waker.take()
+                }) {
                     wakers.push(waker);
                 }
                 drop(waiter);
@@ -175,7 +181,15 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
                     },
                 ) {
                     Ok(_) => Poll::Ready(false),
+                    #[cfg(not(loom))]
                     Err(_) if !enqueued || notify.0.generation.load(SeqCst) != *this.generation => {
+                        Poll::Ready(enqueued)
+                    }
+                    #[cfg(loom)]
+                    Err(_)
+                        if !enqueued
+                            || notify.0.generation.fetch_add(0, SeqCst) != *this.generation =>
+                    {
                         Poll::Ready(enqueued)
                     }
                     Err(_) => Poll::Pending,
@@ -188,10 +202,13 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
                 Poll::Ready(false)
             }
             NodeState::Queued(mut waiter) => {
-                if let Some(cx) = cx
-                    && (waiter.waker.as_ref()).is_none_or(|waker| !waker.will_wake(cx.waker()))
-                {
-                    waiter.waker = Some(cx.waker().clone());
+                if let Some(cx) = cx {
+                    waiter.with_data(|waiter| {
+                        if (waiter.waker.as_ref()).is_none_or(|waker| !waker.will_wake(cx.waker()))
+                        {
+                            waiter.waker = Some(cx.waker().clone());
+                        }
+                    });
                 }
                 Poll::Pending
             }
@@ -206,11 +223,13 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
             NodeState::Queued(waiter) => {
                 waiter.dequeue_try_set_queue_state(STATE_UNNOTIFIED).ok();
             }
-            NodeState::Dequeued(waiter) => match waiter.notification.unwrap() {
-                Notification::One => waiter.queue().0.notify_one(),
-                Notification::Last => waiter.queue().0.notify_last(),
-                _ => {}
-            },
+            NodeState::Dequeued(mut waiter) => {
+                match waiter.with_data(|w| w.notification.unwrap()) {
+                    Notification::One => waiter.queue().0.notify_one(),
+                    Notification::Last => waiter.queue().0.notify_last(),
+                    _ => {}
+                }
+            }
         }
     }
 }

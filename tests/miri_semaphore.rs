@@ -180,13 +180,13 @@ fn batch() {
 #[test]
 fn release_during_acquire() {
     let semaphore = Arc::new(Semaphore::new(10));
-    let permits1 = semaphore
+    let permits = semaphore
         .try_acquire_many(8)
         .expect("try_acquire should succeed; semaphore uncontended");
     let semaphore2 = semaphore.clone();
     let thread = thread::spawn(move || block_on(semaphore2.acquire_many(4)).unwrap().forget());
 
-    drop(permits1);
+    drop(permits);
     thread.join().unwrap();
     semaphore.add_permits(4);
     assert_eq!(10, semaphore.available_permits());

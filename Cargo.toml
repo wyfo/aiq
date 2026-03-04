@@ -28,6 +28,13 @@ pin-project-lite = "0.2.16"
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-test = "0.4.5"
 
+[target.'cfg(loom)'.dependencies]
+loom = "0.7.2"
+const_fn = "0.4.12"
+
+[target.'cfg(loom)'.dev-dependencies]
+loom = { version = "0.7.2", features = ["futures"] }
+
 [lib]
 test = false
 
@@ -37,6 +44,14 @@ required-features = ["queue-state"]
 
 [[example]]
 name = "semaphore"
+required-features = ["queue-state"]
+
+[[test]]
+name = "loom_notify"
+required-features = ["queue-state"]
+
+[[test]]
+name = "loom_semaphore"
 required-features = ["queue-state"]
 
 [[test]]
@@ -85,7 +100,7 @@ harness = false
 all-features = true
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(nightly)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(nightly)", "cfg(loom)"] }
 unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]

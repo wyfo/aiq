@@ -1,13 +1,14 @@
 #[cfg(nightly)]
 use core::pin::UnsafePinned;
+use core::{hint::unreachable_unchecked, pin::Pin, ptr, ptr::NonNull};
+#[cfg(not(loom))]
 use core::{
-    hint::unreachable_unchecked,
     ops::{Deref, DerefMut},
-    pin::Pin,
-    ptr,
-    ptr::NonNull,
     sync::atomic::{AtomicPtr, Ordering::*},
 };
+
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicPtr, Ordering::*};
 
 #[cfg(feature = "queue-state")]
 use crate::queue::state::*;
@@ -22,6 +23,7 @@ pub(crate) struct NodeLink {
 }
 
 impl NodeLink {
+    #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     pub(crate) const fn new() -> Self {
         Self {
             prev: AtomicPtr::new(ptr::null_mut()),
@@ -58,7 +60,10 @@ impl NodeLink {
 #[repr(C)]
 pub(crate) struct NodeWithData<T> {
     pub(crate) link: NodeLink,
+    #[cfg(not(loom))]
     pub(crate) data: T,
+    #[cfg(loom)]
+    pub(crate) data: loom::cell::UnsafeCell<T>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -83,12 +88,16 @@ unsafe impl<Q: QueueRef> Send for Node<Q> {}
 unsafe impl<Q: QueueRef> Sync for Node<Q> {}
 
 impl<Q: QueueRef> Node<Q> {
+    #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     pub const fn new(queue: Q, data: Q::NodeData) -> Self {
         Self {
             queue,
             node: UnsafePinned::new(NodeWithData {
                 link: NodeLink::new(),
+                #[cfg(not(loom))]
                 data,
+                #[cfg(loom)]
+                data: loom::cell::UnsafeCell::new(data),
             }),
         }
     }
@@ -156,11 +165,24 @@ macro_rules! node_getters {
                 self.queue
             }
 
+            #[cfg(not(loom))]
             pub fn data_pinned(&mut self) -> Pin<&mut Q::NodeData> {
                 unsafe { Pin::new_unchecked(&mut (*self.node.as_ptr()).data) }
             }
+            #[doc(hidden)]
+            #[inline(always)]
+            pub fn with_data<F: FnOnce(&mut Q::NodeData) -> R, R>(&mut self, f: F) -> R
+            where
+                Q::NodeData: Unpin,
+            {
+                #[cfg(not(loom))]
+                return f(unsafe { &mut (*self.node.as_ptr()).data });
+                #[cfg(loom)]
+                return unsafe { (*self.node.as_ptr()).data.with_mut(|data| f(&mut *data)) };
+            }
         }
 
+        #[cfg(not(loom))]
         impl<Q: QueueRef> Deref for $node<'_, Q> {
             type Target = Q::NodeData;
 
@@ -169,7 +191,11 @@ macro_rules! node_getters {
             }
         }
 
-        impl<Q: QueueRef> DerefMut for $node<'_, Q> {
+        #[cfg(not(loom))]
+        impl<Q: QueueRef> DerefMut for $node<'_, Q>
+        where
+            Q::NodeData: Unpin,
+        {
             fn deref_mut(&mut self) -> &mut Self::Target {
                 unsafe { &mut (*self.node.as_ptr()).data }
             }
@@ -207,7 +233,15 @@ impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
         mut f: F,
         mut init: I,
     ) -> Result<(), Option<QueueState>> {
+        #[cfg(not(loom))]
         let data_pinned = || unsafe { Pin::new_unchecked(&mut (*self.node.as_ptr()).data) };
+        #[cfg(loom)]
+        let data_pinned = || ();
+        #[cfg(loom)]
+        let mut init = |state, _: ()| unsafe {
+            ((*self.node.as_ptr()).data)
+                .with_mut(|data| init(state, Pin::new_unchecked(&mut *data)))
+        };
         let new_tail = |tail| match StateOrTail::from(tail) {
             StateOrTail::State(state) => match f(state) {
                 Some(new_state) => Some((StateOrTail::State(new_state).into(), None)),

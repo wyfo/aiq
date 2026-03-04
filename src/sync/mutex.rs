@@ -1,8 +1,10 @@
 #[cfg(feature = "std")]
 extern crate std;
 
+#[cfg(not(loom))]
 use core::sync::atomic::{AtomicBool, Ordering::*};
 
+#[cfg(not(loom))]
 #[cfg(feature = "pthread")]
 pub use crate::sync::pthread::PthreadMutex;
 
@@ -13,7 +15,10 @@ pub use crate::sync::pthread::PthreadMutex;
 ///
 /// Calls to [`unlock`](Self::unlock) must *synchronize-with* calls to [`lock`](Self::lock).
 pub unsafe trait Mutex {
+    #[cfg(not(loom))]
     const INIT: Self;
+    #[cfg(loom)]
+    fn new() -> Self;
     type Guard<'a>
     where
         Self: 'a;
@@ -24,6 +29,7 @@ pub unsafe trait Mutex {
     unsafe fn unlock<'a>(&'a self, guard: Self::Guard<'a>);
 }
 
+#[cfg(not(loom))]
 cfg_if::cfg_if! {
     if #[cfg(feature = "parking_lot")] {
         pub type DefaultMutex = parking_lot::RawMutex;
@@ -35,10 +41,14 @@ cfg_if::cfg_if! {
         pub type DefaultMutex = SpinMutex;
     }
 }
+#[cfg(loom)]
+pub type DefaultMutex = StdMutex;
 
+#[cfg(not(loom))]
 pub struct SpinMutex(AtomicBool);
+#[cfg(not(loom))]
 unsafe impl Mutex for SpinMutex {
-    const INIT: Self = SpinMutex(AtomicBool::new(false));
+    const INIT: Self = Self(AtomicBool::new(false));
     type Guard<'a>
         = ()
     where
@@ -57,6 +67,7 @@ unsafe impl Mutex for SpinMutex {
     }
 }
 
+#[cfg(not(loom))]
 #[cfg(feature = "lock_api")]
 unsafe impl<M: lock_api::RawMutex> Mutex for M {
     const INIT: Self = <Self as lock_api::RawMutex>::INIT;
@@ -78,14 +89,28 @@ unsafe impl<M: lock_api::RawMutex> Mutex for M {
 
 #[cfg(feature = "std")]
 #[derive(Debug)]
-pub struct StdMutex(std::sync::Mutex<()>);
+pub struct StdMutex(
+    #[cfg(not(loom))] std::sync::Mutex<()>,
+    #[cfg(loom)] loom::sync::Mutex<()>,
+);
 
 #[cfg(feature = "std")]
 unsafe impl Mutex for StdMutex {
+    #[cfg(not(loom))]
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self(std::sync::Mutex::new(()));
+    #[cfg(loom)]
+    fn new() -> Self {
+        Self(loom::sync::Mutex::new(()))
+    }
+    #[cfg(not(loom))]
     type Guard<'a>
         = std::sync::MutexGuard<'a, ()>
+    where
+        Self: 'a;
+    #[cfg(loom)]
+    type Guard<'a>
+        = loom::sync::MutexGuard<'a, ()>
     where
         Self: 'a;
     #[inline]
