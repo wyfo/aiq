@@ -97,7 +97,6 @@ macro_rules! __private_queue_ref {
     (@sync $ty:ty) => { $ty };
 }
 
-#[repr(C)]
 pub struct Queue<T, S: SyncPrimitives = DefaultSyncPrimitives> {
     tail: AtomicPtr<NodeLink>,
     head: AtomicPtr<NodeLink>,

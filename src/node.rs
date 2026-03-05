@@ -13,7 +13,6 @@ use crate::queue::{LockedQueue, QueueRef};
 #[cfg(not(nightly))]
 use crate::unsafe_pinned::UnsafePinned;
 
-#[repr(C)]
 pub(crate) struct NodeLink {
     pub(crate) prev: AtomicPtr<NodeLink>,
     pub(crate) next: AtomicPtr<NodeLink>,
@@ -55,7 +54,7 @@ impl NodeLink {
 }
 
 #[repr(C)]
-pub(crate) struct NodeWithData<T> {
+pub(crate) struct NodeInner<T> {
     pub(crate) link: NodeLink,
     #[cfg(not(loom))]
     pub(crate) data: T,
@@ -78,7 +77,7 @@ pub enum NodeState<'a, Q: QueueRef> {
 
 pub struct Node<Q: QueueRef> {
     queue: Q,
-    node: UnsafePinned<NodeWithData<Q::NodeData>>,
+    node: UnsafePinned<NodeInner<Q::NodeData>>,
 }
 
 unsafe impl<Q: QueueRef> Send for Node<Q> {}
@@ -89,7 +88,7 @@ impl<Q: QueueRef> Node<Q> {
     pub const fn new(queue: Q, data: Q::NodeData) -> Self {
         Self {
             queue,
-            node: UnsafePinned::new(NodeWithData {
+            node: UnsafePinned::new(NodeInner {
                 link: NodeLink::new(),
                 #[cfg(not(loom))]
                 data,
@@ -156,7 +155,7 @@ impl<Q: QueueRef> Drop for Node<Q> {
 }
 
 pub struct NodeUnqueued<'a, Q: QueueRef> {
-    node: NonNull<NodeWithData<Q::NodeData>>,
+    node: NonNull<NodeInner<Q::NodeData>>,
     queue: &'a Q,
 }
 
@@ -218,7 +217,7 @@ impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
 }
 
 pub struct NodeQueued<'a, Q: QueueRef> {
-    node: NonNull<NodeWithData<Q::NodeData>>,
+    node: NonNull<NodeInner<Q::NodeData>>,
     queue: &'a Q,
     locked: LockedQueue<'a, Q::NodeData, Q::SyncPrimitives>,
 }
@@ -255,7 +254,7 @@ impl<'a, Q: QueueRef> NodeQueued<'a, Q> {
 }
 
 pub struct NodeDequeued<'a, Q: QueueRef> {
-    node: NonNull<NodeWithData<Q::NodeData>>,
+    node: NonNull<NodeInner<Q::NodeData>>,
     queue: &'a Q,
 }
 
@@ -272,12 +271,12 @@ macro_rules! node_getters {
         impl<$($lf,)* $($arg $(:$bound)?),*> $node<$($lf,)* $($arg),*> {
             #[cfg(not(loom))]
             fn data_ptr(&self) -> *mut $data {
-                unsafe { &raw mut (*self.node.as_ptr().cast::<crate::node::NodeWithData<$data>>()).data }
+                unsafe { &raw mut (*self.node.as_ptr().cast::<crate::node::NodeInner<$data>>()).data }
             }
 
             #[cfg(loom)]
             fn data_ptr(&self) -> *mut loom::cell::UnsafeCell<$data> {
-                unsafe { &raw mut (*self.node.as_ptr().cast::<crate::node::NodeWithData<$data>>()).data }
+                unsafe { &raw mut (*self.node.as_ptr().cast::<crate::node::NodeInner<$data>>()).data }
             }
 
             #[cfg(not(loom))]
