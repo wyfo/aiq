@@ -36,7 +36,7 @@ pub use drain::*;
 #[cfg(feature = "queue-state")]
 pub use state::*;
 
-use crate::node::node_getters;
+use crate::node::{RawNodeState, node_getters};
 
 type MutexGuard<'a, S> = <<S as SyncPrimitives>::Mutex as Mutex>::Guard<'a>;
 
@@ -249,7 +249,8 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         }
     }
 
-    const HEAD: NonNull<NodeLink> = NonNull::new(ptr::without_provenance_mut(2)).unwrap();
+    const HEAD: NonNull<NodeLink> =
+        NonNull::new(ptr::without_provenance_mut(RawNodeState::Queued as usize)).unwrap();
 
     pub(crate) unsafe fn enqueue(
         &self,
@@ -388,7 +389,13 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
     #[inline]
     pub fn pop(&mut self) -> Option<NodeDequeuing<'a, '_, T, S>> {
         let node = self.tail()?;
-        let prev_next = self.get_next(unsafe { &node.as_ref().prev().next });
+        let prev = unsafe { node.as_ref().prev.load(Relaxed) };
+        let prev_next_ptr = if prev == Queue::<T, S>::HEAD.as_ptr() {
+            &self.head
+        } else {
+            unsafe { &(*prev).next }
+        };
+        let prev_next = self.get_next(prev_next_ptr);
         debug_assert_eq!(prev_next, node);
         Some(NodeDequeuing { node, locked: self })
     }
@@ -406,18 +413,21 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
     pub(crate) unsafe fn remove(&mut self, node: &NodeLink, mut new_tail: *mut NodeLink) -> bool {
         let prev = node.prev.load(Relaxed);
         let is_head = prev == Queue::<T, S>::HEAD.as_ptr();
-        #[rustfmt::skip]
-        let prev_next = if is_head { &self.head } else { &node.prev().next };
+        let prev_next_ptr = if is_head {
+            &self.head
+        } else {
+            unsafe { &(*prev).next }
+        };
         let unlink = |next: NonNull<NodeLink>| {
             unsafe { next.as_ref().prev.store(prev, Relaxed) };
-            prev_next.store(next.as_ptr(), Relaxed);
+            prev_next_ptr.store(next.as_ptr(), Relaxed);
             node.dequeue();
             false
         };
         if let Some(next) = node.next() {
             return unlink(next);
         }
-        prev_next.store(ptr::null_mut(), Relaxed);
+        prev_next_ptr.store(ptr::null_mut(), Relaxed);
         #[cfg(not(feature = "queue-state"))]
         if !is_head {
             new_tail = prev;
