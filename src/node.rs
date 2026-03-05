@@ -13,6 +13,7 @@ use crate::queue::{LockedQueue, QueueRef};
 #[cfg(not(nightly))]
 use crate::unsafe_pinned::UnsafePinned;
 
+#[repr(align(4))]
 pub(crate) struct NodeLink {
     pub(crate) prev: AtomicPtr<NodeLink>,
     pub(crate) next: AtomicPtr<NodeLink>,
