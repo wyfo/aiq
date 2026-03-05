@@ -288,7 +288,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
             unsafe { &prev.as_ref().next }
         });
         #[cfg(not(any(target_arch = "x86_64", loom)))]
-        unsafe { prev_next.as_ref() }.store(node.as_ptr().cast(), SeqCst);
+        unsafe { prev_next.as_ref() }.store(node.as_ptr(), SeqCst);
         #[cfg(not(any(target_arch = "x86_64", loom)))]
         if self.parked_node.load(SeqCst) == prev_next.as_ptr() {
             self.unpark();
@@ -354,13 +354,11 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             }
         }
         #[cfg(not(any(target_arch = "x86_64", loom)))]
-        let next_ptr = ptr::from_ref(next).cast_mut();
-        #[cfg(not(any(target_arch = "x86_64", loom)))]
-        self.parked_node.store(next_ptr, SeqCst);
+        (self.parked_node).store(ptr::from_ref(next).cast_mut(), SeqCst);
         #[cfg(any(target_arch = "x86_64", loom))]
-        let parked_ptr = ptr::without_provenance_mut(1);
+        const PARKED: *mut NodeLink = ptr::without_provenance_mut(1);
         #[cfg(any(target_arch = "x86_64", loom))]
-        if let Err(next) = next.compare_exchange(ptr::null_mut(), parked_ptr, Relaxed, SeqCst) {
+        if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, SeqCst) {
             return unsafe { NonNull::new_unchecked(next) };
         }
         loop {
@@ -372,7 +370,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             #[cfg(any(target_arch = "x86_64", loom))]
             let next = next.load(SeqCst);
             #[cfg(any(target_arch = "x86_64", loom))]
-            if next != parked_ptr {
+            if next != PARKED {
                 return unsafe { NonNull::new_unchecked(next) };
             }
             unsafe { self.parker.park() };
