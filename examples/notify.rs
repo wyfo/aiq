@@ -62,7 +62,7 @@ impl Notify {
             Notification::Last => locked.pop().unwrap(),
             _ => unreachable!(),
         };
-        let waker = waiter.with_data(|waiter| {
+        let waker = waiter.with_data_mut(|mut waiter| {
             waiter.notification = Some(notification);
             waiter.waker.take()
         });
@@ -196,7 +196,7 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
             }
             NodeState::Queued(mut waiter) => {
                 if let Some(cx) = cx {
-                    waiter.with_data(|waiter| {
+                    waiter.with_data_mut(|mut waiter| {
                         if (waiter.waker.as_ref()).is_none_or(|waker| !waker.will_wake(cx.waker()))
                         {
                             waiter.waker = Some(cx.waker().clone());
@@ -217,7 +217,7 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
                 waiter.dequeue_try_set_queue_state(STATE_UNNOTIFIED).ok();
             }
             NodeState::Dequeued(mut waiter) => {
-                match waiter.with_data(|w| w.notification.unwrap()) {
+                match waiter.with_data_mut(|w| w.notification.unwrap()) {
                     Notification::One => waiter.queue().0.notify_one(),
                     Notification::Last => waiter.queue().0.notify_last(),
                     _ => {}

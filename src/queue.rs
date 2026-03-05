@@ -12,7 +12,6 @@ use core::{
 };
 #[cfg(not(loom))]
 use core::{
-    ops::DerefMut,
     pin::Pin,
     sync::atomic,
     sync::atomic::{AtomicPtr, Ordering::*},
@@ -25,7 +24,7 @@ use loom::sync::{
 };
 
 use crate::{
-    node::{NodeLink, NodeWithData},
+    node::NodeLink,
     sync::{DefaultSyncPrimitives, SyncPrimitives, mutex::Mutex, parker::Parker},
 };
 
@@ -36,6 +35,8 @@ pub(crate) mod state;
 pub use drain::*;
 #[cfg(feature = "queue-state")]
 pub use state::*;
+
+use crate::node::node_getters;
 
 type MutexGuard<'a, S> = <<S as SyncPrimitives>::Mutex as Mutex>::Guard<'a>;
 
@@ -143,14 +144,18 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         Self::new_impl(state_to_ptr(state))
     }
 
+    #[inline(always)]
+    fn load_tail(&self) -> *mut NodeLink {
+        #[cfg(not(loom))]
+        return self.tail.load(SeqCst);
+        #[cfg(loom)]
+        return (self.tail).compare_and_swap(ptr::null_mut(), ptr::null_mut(), SeqCst);
+    }
+
     #[cfg(feature = "queue-state")]
     #[inline]
     pub fn state(&self) -> Option<QueueState> {
-        #[cfg(not(loom))]
-        let tail = self.tail.load(SeqCst);
-        #[cfg(loom)]
-        let tail = (self.tail).compare_and_swap(ptr::null_mut(), ptr::null_mut(), SeqCst);
-        match tail.into() {
+        match self.load_tail().into() {
             StateOrTail::State(state) => Some(state),
             _ => None,
         }
@@ -161,13 +166,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         #[cfg(feature = "queue-state")]
         return self.state().is_some();
         #[cfg(not(feature = "queue-state"))]
-        {
-            #[cfg(not(loom))]
-            let tail = self.tail.load(SeqCst);
-            #[cfg(loom)]
-            let tail = (self.tail).compare_and_swap(ptr::null_mut(), ptr::null_mut(), SeqCst);
-            tail.is_null()
-        }
+        return self.load_tail().is_null();
     }
 
     #[cfg(feature = "queue-state")]
@@ -328,14 +327,10 @@ pub struct LockedQueue<'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
 impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
     #[inline(always)]
     fn tail(&self) -> Option<NonNull<NodeLink>> {
-        #[cfg(not(loom))]
-        let tail = self.tail.load(SeqCst);
-        #[cfg(loom)]
-        let tail = (self.tail).compare_and_swap(ptr::null_mut(), ptr::null_mut(), SeqCst);
         #[cfg(not(feature = "queue-state"))]
-        return NonNull::new(tail);
+        return NonNull::new(self.load_tail());
         #[cfg(feature = "queue-state")]
-        return match tail.into() {
+        return match self.load_tail().into() {
             StateOrTail::Tail(tail) => Some(tail),
             _ => None,
         };
@@ -464,22 +459,9 @@ pub struct NodeDequeuing<'locked, 'a, T, S: SyncPrimitives = DefaultSyncPrimitiv
     locked: &'a mut LockedQueue<'locked, T, S>,
 }
 
-impl<T, S: SyncPrimitives> NodeDequeuing<'_, '_, T, S> {
-    #[cfg(not(loom))]
-    pub fn data_pinned(&mut self) -> Pin<&mut T> {
-        unsafe { Pin::new_unchecked(&mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data) }
-    }
-    #[doc(hidden)]
-    #[inline(always)]
-    pub fn with_data<F: FnOnce(&mut T) -> R, R>(&mut self, f: F) -> R {
-        #[cfg(not(loom))]
-        return f(unsafe { &mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data });
-        #[cfg(loom)]
-        return unsafe {
-            ((*self.node.cast::<NodeWithData<T>>().as_ptr()).data).with_mut(|data| f(&mut *data))
-        };
-    }
+node_getters!(NodeDequeuing<'drain, 'a, T, S: SyncPrimitives>, T);
 
+impl<T, S: SyncPrimitives> NodeDequeuing<'_, '_, T, S> {
     pub fn requeue(self) {
         mem::forget(self);
     }
@@ -494,20 +476,5 @@ impl<T, S: SyncPrimitives> NodeDequeuing<'_, '_, T, S> {
 impl<T, S: SyncPrimitives> Drop for NodeDequeuing<'_, '_, T, S> {
     fn drop(&mut self) {
         unsafe { self.locked.remove(self.node.as_ref(), ptr::null_mut()) };
-    }
-}
-
-#[cfg(not(loom))]
-impl<T, S: SyncPrimitives> Deref for NodeDequeuing<'_, '_, T, S> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &(*self.node.cast::<NodeWithData<T>>().as_ptr()).data }
-    }
-}
-#[cfg(not(loom))]
-impl<T: Unpin, S: SyncPrimitives> DerefMut for NodeDequeuing<'_, '_, T, S> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data }
     }
 }

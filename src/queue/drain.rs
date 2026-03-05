@@ -1,8 +1,5 @@
 #[cfg(not(loom))]
-use core::{
-    ops::{Deref, DerefMut},
-    sync::atomic::{AtomicPtr, Ordering::*},
-};
+use core::sync::atomic::{AtomicPtr, Ordering::*};
 use core::{
     pin::{Pin, pin},
     ptr,
@@ -16,7 +13,7 @@ use loom::sync::atomic::{AtomicPtr, Ordering::*};
 use crate::queue::state::*;
 use crate::{
     Queue,
-    node::NodeWithData,
+    node::node_getters,
     queue::{LockedQueue, NodeLink},
     sync::{DefaultSyncPrimitives, SyncPrimitives},
 };
@@ -118,7 +115,7 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
             let Some(mut node) = this.as_mut().next() else {
                 break;
             };
-            if node.with_data(|data| on_next(helper, data)) {
+            if node.with_data_mut(|data| on_next(helper, data)) {
                 drop(node);
                 this.as_mut().execute_unlocked(|| on_unlock(helper));
             }
@@ -138,6 +135,8 @@ pub struct NodeDrained<'drain, 'a, T, S: SyncPrimitives = DefaultSyncPrimitives>
     drain: &'a mut Drain<'drain, T, S>,
 }
 
+node_getters!(NodeDrained<'drain, 'a, T, S: SyncPrimitives>, T);
+
 impl<T, S: SyncPrimitives> Drop for NodeDrained<'_, '_, T, S> {
     fn drop(&mut self) {
         let next = if self.node == self.drain.sentinel_node.prev().into() {
@@ -148,38 +147,5 @@ impl<T, S: SyncPrimitives> Drop for NodeDrained<'_, '_, T, S> {
         };
         self.drain.set_head(next);
         unsafe { self.node.as_ref().dequeue() }
-    }
-}
-
-impl<T, S: SyncPrimitives> NodeDrained<'_, '_, T, S> {
-    #[cfg(not(loom))]
-    pub fn data_pinned(&mut self) -> Pin<&mut T> {
-        unsafe { Pin::new_unchecked(&mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data) }
-    }
-    #[doc(hidden)]
-    #[inline(always)]
-    pub fn with_data<F: FnOnce(Pin<&mut T>) -> R, R>(&mut self, f: F) -> R {
-        #[cfg(not(loom))]
-        return f(self.data_pinned());
-        #[cfg(loom)]
-        return unsafe {
-            ((*self.node.cast::<NodeWithData<T>>().as_ptr()).data)
-                .with_mut(|data| f(Pin::new_unchecked(&mut *data)))
-        };
-    }
-}
-
-#[cfg(not(loom))]
-impl<T, S: SyncPrimitives> Deref for NodeDrained<'_, '_, T, S> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &(*self.node.cast::<NodeWithData<T>>().as_ptr()).data }
-    }
-}
-#[cfg(not(loom))]
-impl<T: Unpin, S: SyncPrimitives> DerefMut for NodeDrained<'_, '_, T, S> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data }
     }
 }

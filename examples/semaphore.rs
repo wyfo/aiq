@@ -63,7 +63,7 @@ impl Semaphore {
         'outer: loop {
             loop {
                 let mut waiter = locked.dequeue().unwrap();
-                let requeue = waiter.with_data(|waiter| {
+                let requeue = waiter.with_data_mut(|mut waiter| {
                     if waiter.permits as usize > n {
                         waiter.permits -= n as u32;
                         return true;
@@ -264,7 +264,7 @@ impl<'a> Acquire<'a> {
                 Poll::Ready(Err(AcquireError(())))
             }
             NodeState::Queued(mut waiter) => {
-                waiter.with_data(|waiter| {
+                waiter.with_data_mut(|mut waiter| {
                     if !waiter.waker.as_ref().unwrap().will_wake(cx.waker()) {
                         waiter.waker = Some(cx.waker().clone());
                     }
@@ -284,7 +284,7 @@ impl<'a> Acquire<'a> {
         match this.node.state() {
             NodeState::Unqueued(_) => {}
             NodeState::Queued(mut waiter) => {
-                let acquired = (*this.permits - waiter.with_data(|w| w.permits)) as _;
+                let acquired = (*this.permits - waiter.with_data_mut(|w| w.permits)) as _;
                 if let Err((sem, locked)) = waiter.dequeue_try_set_queue_state(acquired) {
                     sem.0.add_permits_locked(acquired, locked);
                 }

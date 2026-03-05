@@ -1,11 +1,8 @@
 #[cfg(nightly)]
 use core::pin::UnsafePinned;
-use core::{hint::unreachable_unchecked, pin::Pin, ptr, ptr::NonNull};
 #[cfg(not(loom))]
-use core::{
-    ops::{Deref, DerefMut},
-    sync::atomic::{AtomicPtr, Ordering::*},
-};
+use core::sync::atomic::{AtomicPtr, Ordering::*};
+use core::{hint::unreachable_unchecked, pin::Pin, ptr, ptr::NonNull};
 
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicPtr, Ordering::*};
@@ -158,57 +155,18 @@ impl<Q: QueueRef> Drop for Node<Q> {
     }
 }
 
-macro_rules! node_getters {
-    ($node:ident) => {
-        impl<'a, Q: QueueRef> $node<'a, Q> {
-            pub fn queue(&self) -> &'a Q {
-                self.queue
-            }
-
-            #[cfg(not(loom))]
-            pub fn data_pinned(&mut self) -> Pin<&mut Q::NodeData> {
-                unsafe { Pin::new_unchecked(&mut (*self.node.as_ptr()).data) }
-            }
-            #[doc(hidden)]
-            #[inline(always)]
-            pub fn with_data<F: FnOnce(&mut Q::NodeData) -> R, R>(&mut self, f: F) -> R
-            where
-                Q::NodeData: Unpin,
-            {
-                #[cfg(not(loom))]
-                return f(unsafe { &mut (*self.node.as_ptr()).data });
-                #[cfg(loom)]
-                return unsafe { (*self.node.as_ptr()).data.with_mut(|data| f(&mut *data)) };
-            }
-        }
-
-        #[cfg(not(loom))]
-        impl<Q: QueueRef> Deref for $node<'_, Q> {
-            type Target = Q::NodeData;
-
-            fn deref(&self) -> &Self::Target {
-                unsafe { &(*self.node.as_ptr()).data }
-            }
-        }
-
-        #[cfg(not(loom))]
-        impl<Q: QueueRef> DerefMut for $node<'_, Q>
-        where
-            Q::NodeData: Unpin,
-        {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                unsafe { &mut (*self.node.as_ptr()).data }
-            }
-        }
-    };
-}
-
 pub struct NodeUnqueued<'a, Q: QueueRef> {
     node: NonNull<NodeWithData<Q::NodeData>>,
     queue: &'a Q,
 }
 
+node_getters!(NodeUnqueued<'a, Q: QueueRef>, Q::NodeData);
+
 impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
+    pub fn queue(&self) -> &'a Q {
+        self.queue
+    }
+
     #[inline]
     pub fn enqueue(self) {
         #[cfg(feature = "queue-state")]
@@ -229,35 +187,27 @@ impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
         F: FnMut(QueueState) -> Option<QueueState>,
         I: FnMut(Option<QueueState>, Pin<&mut Q::NodeData>) -> bool,
     >(
-        self,
+        mut self,
         mut f: F,
         mut init: I,
     ) -> Result<(), Option<QueueState>> {
-        #[cfg(not(loom))]
-        let data_pinned = || unsafe { Pin::new_unchecked(&mut (*self.node.as_ptr()).data) };
-        #[cfg(loom)]
-        let data_pinned = || ();
-        #[cfg(loom)]
-        let mut init = |state, _: ()| unsafe {
-            ((*self.node.as_ptr()).data)
-                .with_mut(|data| init(state, Pin::new_unchecked(&mut *data)))
-        };
+        let Self { node, queue } = self;
         let new_tail = |tail| match StateOrTail::from(tail) {
             StateOrTail::State(state) => match f(state) {
                 Some(new_state) => Some((StateOrTail::State(new_state).into(), None)),
-                None if init(Some(state), data_pinned()) => Some((
+                None if self.with_data_mut(|data| init(Some(state), data)) => Some((
                     StateOrTail::Tail(self.node.cast()).into(),
                     Some(ptr::null_mut()),
                 )),
                 None => None,
             },
-            StateOrTail::Tail(tail) if init(None, data_pinned()) => Some((
+            StateOrTail::Tail(tail) if self.with_data_mut(|data| init(None, data)) => Some((
                 StateOrTail::Tail(self.node.cast()).into(),
                 Some(tail.as_ptr()),
             )),
             StateOrTail::Tail(_) => None,
         };
-        match unsafe { self.queue.queue().enqueue(self.node.cast(), new_tail) } {
+        match unsafe { queue.queue().enqueue(node.cast(), new_tail) } {
             Some(tail) => Err(match tail.into() {
                 StateOrTail::State(state) => Some(state),
                 _ => None,
@@ -267,15 +217,19 @@ impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
     }
 }
 
-node_getters!(NodeUnqueued);
-
 pub struct NodeQueued<'a, Q: QueueRef> {
     node: NonNull<NodeWithData<Q::NodeData>>,
     queue: &'a Q,
     locked: LockedQueue<'a, Q::NodeData, Q::SyncPrimitives>,
 }
 
+node_getters!(NodeQueued<'a, Q: QueueRef>, Q::NodeData);
+
 impl<'a, Q: QueueRef> NodeQueued<'a, Q> {
+    pub fn queue(&self) -> &'a Q {
+        self.queue
+    }
+
     pub fn dequeue(mut self) -> (&'a Q, LockedQueue<'a, Q::NodeData, Q::SyncPrimitives>) {
         let node = unsafe { self.node.cast().as_ref() };
         unsafe { self.locked.remove(node, ptr::null_mut()) };
@@ -300,11 +254,83 @@ impl<'a, Q: QueueRef> NodeQueued<'a, Q> {
     }
 }
 
-node_getters!(NodeQueued);
-
 pub struct NodeDequeued<'a, Q: QueueRef> {
     node: NonNull<NodeWithData<Q::NodeData>>,
     queue: &'a Q,
 }
 
-node_getters!(NodeDequeued);
+node_getters!(NodeDequeued<'a, Q: QueueRef>, Q::NodeData);
+
+impl<'a, Q: QueueRef> NodeDequeued<'a, Q> {
+    pub fn queue(&self) -> &'a Q {
+        self.queue
+    }
+}
+
+macro_rules! node_getters {
+    ($node:ident<$($lf:lifetime,)* $($arg:ident $(:$bound:path)?),*>, $data:ty) => {
+        impl<$($lf,)* $($arg $(:$bound)?),*> $node<$($lf,)* $($arg),*> {
+            #[cfg(not(loom))]
+            fn data_ptr(&self) -> *mut $data {
+                unsafe { &raw mut (*self.node.as_ptr().cast::<crate::node::NodeWithData<$data>>()).data }
+            }
+
+            #[cfg(loom)]
+            fn data_ptr(&self) -> *mut loom::cell::UnsafeCell<$data> {
+                unsafe { &raw mut (*self.node.as_ptr().cast::<crate::node::NodeWithData<$data>>()).data }
+            }
+
+            #[cfg(not(loom))]
+            #[inline]
+            pub fn data(&self) -> &$data {
+                unsafe { &*self.data_ptr() }
+            }
+
+            #[cfg(not(loom))]
+            #[inline]
+            pub fn data_mut(&mut self) -> core::pin::Pin<&mut $data> {
+                unsafe { Pin::new_unchecked(&mut *self.data_ptr()) }
+            }
+
+            #[inline]
+            #[doc(hidden)]
+            pub fn with_data<F: FnOnce(&$data) -> R, R>(&self, f: F) -> R {
+                #[cfg(not(loom))]
+                return f(self.data());
+                #[cfg(loom)]
+                return unsafe { (*self.data_ptr()).with(|data| f(&*data)) }
+            }
+
+            #[inline]
+            #[doc(hidden)]
+            pub fn with_data_mut<F: FnOnce(core::pin::Pin<&mut $data>) -> R, R>(&mut self, f: F) -> R {
+                #[cfg(not(loom))]
+                return f(self.data_mut());
+                #[cfg(loom)]
+                return unsafe { (*self.data_ptr()).with_mut(|data| f(core::pin::Pin::new_unchecked(&mut *data))) }
+            }
+        }
+
+
+        #[cfg(not(loom))]
+        impl<$($lf,)* $($arg $(:$bound)?),*> core::ops::Deref for $node<$($lf,)* $($arg),*> {
+            type Target = $data;
+            #[inline]
+            fn deref(&self) -> &Self::Target {
+                self.data()
+            }
+        }
+
+        #[cfg(not(loom))]
+        impl<$($lf,)* $($arg $(:$bound)?),*> core::ops::DerefMut for $node<$($lf,)* $($arg),*>
+        where
+            Self::Target: Unpin
+        {
+            #[inline]
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                self.data_mut().get_mut()
+            }
+        }
+    };
+}
+pub(crate) use node_getters;
