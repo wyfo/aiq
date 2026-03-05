@@ -23,3 +23,9 @@ repos:
         language: rust
         pass_filenames: false
         types_or: [rust, toml]
+      - id: clippy-loom
+        name: clippy-all-features
+        entry: env RUSTFLAGS=--cfg=loom cargo clippy --all-targets -- -D warnings
+        language: rust
+        pass_filenames: false
+        types_or: [rust, toml]
