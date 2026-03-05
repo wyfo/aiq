@@ -5,11 +5,15 @@ use crate::sync::{
     parker::{DefaultParker, Parker},
 };
 
+#[cfg(feature = "atomic-wait")]
+mod atomic_wait;
 pub mod mutex;
 pub mod parker;
-#[cfg(not(loom))]
 #[cfg(feature = "pthread")]
 mod pthread;
+mod spin;
+#[cfg(feature = "std")]
+mod std;
 
 pub trait SyncPrimitives: Debug {
     type Mutex: Mutex;

@@ -1,20 +1,10 @@
-#[cfg(feature = "std")]
-extern crate std;
-
 #[cfg(feature = "atomic-wait")]
-use core::sync::atomic::AtomicU32;
-#[cfg(not(loom))]
-use core::sync::atomic::{AtomicBool, Ordering::*};
-#[cfg(not(loom))]
-#[cfg(feature = "std")]
-use std::sync::{Condvar, Mutex, atomic::AtomicUsize};
-
-#[cfg(loom)]
-use loom::sync::{Condvar, Mutex, atomic::AtomicUsize, atomic::Ordering::*};
-
-#[cfg(not(loom))]
+pub use super::atomic_wait::AtomicParker;
 #[cfg(feature = "pthread")]
-pub use crate::sync::pthread::PthreadParker;
+pub use super::pthread::PthreadParker;
+pub use super::spin::SpinParker;
+#[cfg(feature = "std")]
+pub use super::std::StdParker;
 
 /// # Safety
 ///
@@ -25,10 +15,14 @@ pub use crate::sync::pthread::PthreadParker;
 /// [`park`]: Self::park
 /// [`unpark`]: Self::unpark
 pub unsafe trait Parker {
-    #[cfg(not(loom))]
     const INIT: Self;
-    #[cfg(loom)]
-    fn new() -> Self;
+    #[doc(hidden)]
+    fn new() -> Self
+    where
+        Self: Sized,
+    {
+        Self::INIT
+    }
     /// # Safety
     ///
     /// `park` can only be called by a single thread at a time.
@@ -36,9 +30,10 @@ pub unsafe trait Parker {
     fn unpark(&self);
 }
 
-#[cfg(not(loom))]
 cfg_if::cfg_if! {
-    if #[cfg(feature = "atomic-wait")] {
+    if #[cfg(loom)] {
+      pub type DefaultParker = StdParker;
+    } else if #[cfg(feature = "atomic-wait")] {
         pub type DefaultParker = AtomicParker;
     } else if #[cfg(feature = "std")] {
         pub type DefaultParker = StdParker;
@@ -46,124 +41,5 @@ cfg_if::cfg_if! {
         pub type DefaultParker = PthreadParker;
     } else {
         pub type DefaultParker = SpinParker;
-    }
-}
-#[cfg(loom)]
-pub type DefaultParker = StdParker;
-
-#[cfg(not(loom))]
-pub struct SpinParker(AtomicBool);
-#[cfg(not(loom))]
-unsafe impl Parker for SpinParker {
-    const INIT: Self = Self(AtomicBool::new(false));
-    #[inline]
-    unsafe fn park(&self) {
-        while !self.0.load(Acquire) {
-            core::hint::spin_loop();
-        }
-    }
-    #[inline]
-    fn unpark(&self) {
-        self.0.store(true, Release);
-    }
-}
-
-#[cfg(feature = "atomic-wait")]
-#[derive(Debug)]
-pub struct AtomicParker(AtomicU32);
-
-#[cfg(feature = "atomic-wait")]
-impl AtomicParker {
-    const EMPTY: u32 = 0;
-    const NOTIFIED: u32 = 1;
-    const PARKED: u32 = u32::MAX;
-}
-
-#[cfg(feature = "atomic-wait")]
-// SAFETY: implementation taken for std Parker futex implementation
-unsafe impl Parker for AtomicParker {
-    #[allow(clippy::declare_interior_mutable_const)]
-    const INIT: Self = Self(AtomicU32::new(0));
-
-    #[inline]
-    unsafe fn park(&self) {
-        if self.0.fetch_sub(1, Acquire) == Self::NOTIFIED {
-            return;
-        }
-        loop {
-            atomic_wait::wait(&self.0, Self::PARKED);
-            if ((self.0).compare_exchange(Self::NOTIFIED, Self::EMPTY, Acquire, Relaxed)).is_ok() {
-                return;
-            }
-        }
-    }
-
-    #[inline]
-    fn unpark(&self) {
-        if self.0.swap(Self::NOTIFIED, Release) == Self::PARKED {
-            atomic_wait::wake_one(&self.0);
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-#[derive(Debug)]
-pub struct StdParker {
-    state: AtomicUsize,
-    mutex: Mutex<()>,
-    condvar: Condvar,
-}
-
-#[cfg(feature = "std")]
-impl StdParker {
-    const EMPTY: usize = 0;
-    const NOTIFIED: usize = 1;
-    const PARKED: usize = usize::MAX;
-}
-
-#[cfg(feature = "std")]
-// SAFETY: implementation inspired for std Parker futex/pthread implementation
-unsafe impl Parker for StdParker {
-    #[cfg(not(loom))]
-    #[allow(clippy::declare_interior_mutable_const)]
-    const INIT: Self = Self {
-        state: AtomicUsize::new(Self::EMPTY),
-        mutex: Mutex::new(()),
-        condvar: Condvar::new(),
-    };
-    #[cfg(loom)]
-    fn new() -> Self {
-        Self {
-            state: AtomicUsize::new(Self::EMPTY),
-            mutex: Mutex::new(()),
-            condvar: Condvar::new(),
-        }
-    }
-
-    #[inline]
-    unsafe fn park(&self) {
-        if self.state.fetch_sub(1, Acquire) == Self::NOTIFIED {
-            return;
-        }
-        let guard = self.mutex.lock().unwrap();
-        let is_not_notified = |_: &mut _| {
-            ((self.state).compare_exchange(Self::NOTIFIED, Self::EMPTY, Acquire, Relaxed)).is_err()
-        };
-        #[cfg(not(loom))]
-        *self.condvar.wait_while(guard, is_not_notified).unwrap();
-        #[cfg(loom)]
-        let mut guard = guard;
-        #[cfg(loom)]
-        while is_not_notified(&mut *guard) {
-            guard = self.condvar.wait(guard).unwrap();
-        }
-    }
-
-    #[inline]
-    fn unpark(&self) {
-        if self.state.swap(Self::NOTIFIED, Release) == Self::PARKED {
-            drop(self.mutex.lock().unwrap());
-            self.condvar.notify_one();
-        }
     }
 }
