@@ -1,6 +1,6 @@
 use std::{
     ops::Deref,
-    pin::{Pin, pin},
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering::SeqCst},
@@ -87,24 +87,17 @@ impl Notify {
         let locked = self.queue.lock();
         self.generation.fetch_add(1, SeqCst);
         let mut wakers = ArrayVec::<Waker, 32>::new();
-        {
-            let mut drain = pin!(locked.drain_try_set_state(STATE_UNNOTIFIED));
-            loop {
-                let Some(mut waiter) = drain.as_mut().next() else {
-                    break;
-                };
-                if let Some(waker) = waiter.with_data(|waiter| {
-                    waiter.notification = Some(Notification::All);
-                    waiter.waker.take()
-                }) {
+        locked.drain_try_set_state(STATE_UNNOTIFIED).for_each(
+            &mut wakers,
+            |wakers, mut waiter| {
+                waiter.notification = Some(Notification::All);
+                if let Some(waker) = waiter.waker.take() {
                     wakers.push(waker);
                 }
-                drop(waiter);
-                if wakers.is_full() {
-                    (drain.as_mut()).execute_unlocked(|| wakers.drain(..).for_each(Waker::wake));
-                }
-            }
-        }
+                wakers.is_full()
+            },
+            |wakers| wakers.drain(..).for_each(Waker::wake),
+        );
         wakers.into_iter().for_each(Waker::wake);
     }
 

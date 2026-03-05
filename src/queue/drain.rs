@@ -3,7 +3,11 @@ use core::{
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicPtr, Ordering::*},
 };
-use core::{pin::Pin, ptr, ptr::NonNull};
+use core::{
+    pin::{Pin, pin},
+    ptr,
+    ptr::NonNull,
+};
 
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicPtr, Ordering::*};
@@ -102,6 +106,24 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
         }
         res
     }
+
+    pub fn for_each<H, N: FnMut(&mut H, Pin<&mut T>) -> bool, U: FnMut(&mut H)>(
+        self,
+        helper: &mut H,
+        mut on_next: N,
+        mut on_unlock: U,
+    ) {
+        let mut this = pin!(self);
+        loop {
+            let Some(mut node) = this.as_mut().next() else {
+                break;
+            };
+            if node.with_data(|data| on_next(helper, data)) {
+                drop(node);
+                this.as_mut().execute_unlocked(|| on_unlock(helper));
+            }
+        }
+    }
 }
 
 impl<'a, T, S: SyncPrimitives> Drop for Drain<'a, T, S> {
@@ -136,15 +158,13 @@ impl<T, S: SyncPrimitives> NodeDrained<'_, '_, T, S> {
     }
     #[doc(hidden)]
     #[inline(always)]
-    pub fn with_data<F: FnOnce(&mut T) -> R, R>(&mut self, f: F) -> R
-    where
-        T: Unpin,
-    {
+    pub fn with_data<F: FnOnce(Pin<&mut T>) -> R, R>(&mut self, f: F) -> R {
         #[cfg(not(loom))]
-        return f(unsafe { &mut (*self.node.cast::<NodeWithData<T>>().as_ptr()).data });
+        return f(self.data_pinned());
         #[cfg(loom)]
         return unsafe {
-            ((*self.node.cast::<NodeWithData<T>>().as_ptr()).data).with_mut(|data| f(&mut *data))
+            ((*self.node.cast::<NodeWithData<T>>().as_ptr()).data)
+                .with_mut(|data| f(Pin::new_unchecked(&mut *data)))
         };
     }
 }

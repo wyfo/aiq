@@ -1,7 +1,7 @@
 use std::{
     cmp::min,
     mem,
-    pin::{Pin, pin},
+    pin::Pin,
     sync::Arc,
     task::{Context, Poll, Waker},
 };
@@ -187,24 +187,14 @@ impl Semaphore {
     pub fn close(&self) {
         if let Some(locked) = self.0.fetch_update_state_or_lock(|state| state | CLOSED) {
             let mut wakers = ArrayVec::<Waker, 32>::new();
-            {
-                let mut drain = pin!(locked.drain_try_set_state(CLOSED));
-                loop {
-                    let Some(mut waiter) = drain.as_mut().next() else {
-                        break;
-                    };
-                    waiter.with_data(|waiter| {
-                        if let Some(waker) = waiter.waker.take() {
-                            wakers.push(waker);
-                        }
-                    });
-                    drop(waiter);
-                    if wakers.is_full() {
-                        (drain.as_mut())
-                            .execute_unlocked(|| wakers.drain(..).for_each(Waker::wake));
-                    }
-                }
-            }
+            locked.drain_try_set_state(CLOSED).for_each(
+                &mut wakers,
+                |wakers, mut waiter| {
+                    wakers.push(waiter.waker.take().unwrap());
+                    wakers.is_full()
+                },
+                |wakers| wakers.drain(..).for_each(Waker::wake),
+            );
             wakers.into_iter().for_each(Waker::wake);
         }
     }
