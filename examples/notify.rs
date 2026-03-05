@@ -1,10 +1,9 @@
+#[cfg(not(loom))]
+use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::{
     ops::Deref,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering::SeqCst},
-    },
+    sync::Arc,
     task::{Context, Poll, Waker, ready},
 };
 
@@ -14,6 +13,8 @@ use aiq::{
     queue_ref,
 };
 use arrayvec::ArrayVec;
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use pin_project_lite::pin_project;
 
 const STATE_UNNOTIFIED: QueueState = 0;
