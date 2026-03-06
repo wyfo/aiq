@@ -101,7 +101,7 @@ pub struct Queue<T, S: SyncPrimitives = DefaultSyncPrimitives> {
     tail: AtomicPtr<NodeLink>,
     head: AtomicPtr<NodeLink>,
     #[cfg(not(any(target_arch = "x86_64", loom)))]
-    parked_node: AtomicPtr<AtomicPtr<NodeLink>>,
+    parked_next: AtomicPtr<AtomicPtr<NodeLink>>,
     mutex: S::Mutex,
     parker: S::Parker,
     _phantom: PhantomData<T>,
@@ -117,7 +117,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
             tail: AtomicPtr::new(tail),
             head: AtomicPtr::new(ptr::null_mut()),
             #[cfg(not(any(target_arch = "x86_64", loom)))]
-            parked_node: AtomicPtr::new(ptr::null_mut()),
+            parked_next: AtomicPtr::new(ptr::null_mut()),
             #[cfg(not(loom))]
             mutex: S::Mutex::INIT,
             #[cfg(loom)]
@@ -290,7 +290,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         #[cfg(not(any(target_arch = "x86_64", loom)))]
         unsafe { prev_next.as_ref() }.store(node.as_ptr(), SeqCst);
         #[cfg(not(any(target_arch = "x86_64", loom)))]
-        if self.parked_node.load(SeqCst) == prev_next.as_ptr() {
+        if self.parked_next.load(SeqCst) == prev_next.as_ptr() {
             self.unpark();
         }
         #[cfg(any(target_arch = "x86_64", loom))]
@@ -354,7 +354,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
             }
         }
         #[cfg(not(any(target_arch = "x86_64", loom)))]
-        (self.parked_node).store(ptr::from_ref(next).cast_mut(), SeqCst);
+        (self.parked_next).store(ptr::from_ref(next).cast_mut(), SeqCst);
         #[cfg(any(target_arch = "x86_64", loom))]
         const PARKED: *mut NodeLink = ptr::without_provenance_mut(1);
         #[cfg(any(target_arch = "x86_64", loom))]
@@ -364,7 +364,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
         loop {
             #[cfg(not(any(target_arch = "x86_64", loom)))]
             if let Some(next) = NonNull::new(next.load(SeqCst)) {
-                self.parked_node.store(ptr::null_mut(), SeqCst);
+                self.parked_next.store(ptr::null_mut(), SeqCst);
                 return next;
             }
             #[cfg(any(target_arch = "x86_64", loom))]
