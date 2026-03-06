@@ -19,7 +19,7 @@ use std::pin::pin;
 let queue: Queue<usize> = Queue::new();
 
 // Nodes carry user data and an intrusive link into the queue
-let mut node = pin!(Node::new(&queue, 42));
+let mut node = pin!(Node::with_data(&queue, 42));
 
 // Enqueue by matching on node state
 match node.state() {

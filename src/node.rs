@@ -85,8 +85,15 @@ unsafe impl<Q: QueueRef> Send for Node<Q> {}
 unsafe impl<Q: QueueRef> Sync for Node<Q> {}
 
 impl<Q: QueueRef> Node<Q> {
+    pub fn new(queue: Q) -> Self
+    where
+        Q::NodeData: Default,
+    {
+        Self::with_data(queue, Default::default())
+    }
+
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
-    pub const fn new(queue: Q, data: Q::NodeData) -> Self {
+    pub const fn with_data(queue: Q, data: Q::NodeData) -> Self {
         Self {
             queue,
             node: UnsafePinned::new(NodeInner {

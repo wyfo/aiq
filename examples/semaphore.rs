@@ -120,7 +120,7 @@ impl Semaphore {
             Err(Some(state)) if state & CLOSED != 0 => return Err(AcquireError(())),
             Err(_) => {
                 Acquire {
-                    node: Node::new(SemaphoreRef(self), Waiter::default()),
+                    node: Node::new(SemaphoreRef(self)),
                     permits: n,
                 }
                 .await?;

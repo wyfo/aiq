@@ -106,7 +106,7 @@ impl Notify {
     pub fn notified(&self) -> Notified<'_> {
         Notified {
             inner: NotifiedInner {
-                node: Node::new(NotifyRef(self), Waiter::default()),
+                node: Node::new(NotifyRef(self)),
                 generation: self.generation.load(SeqCst),
                 completed: false,
             },
@@ -118,7 +118,7 @@ impl Notify {
         OwnedNotified {
             inner: NotifiedInner {
                 generation: self.generation.load(SeqCst),
-                node: Node::new(NotifyRef(self), Waiter::default()),
+                node: Node::new(NotifyRef(self)),
                 completed: false,
             },
         }
