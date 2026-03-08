@@ -30,16 +30,24 @@ impl Semaphore {
     pub const MAX_PERMITS: usize = usize::MAX >> 3;
 
     #[inline(always)]
-    const fn check_permits(state: QueueState, add: usize) -> QueueState {
+    const fn check_add_permits(state: QueueState, add: usize) -> QueueState {
         let current = state >> PERMIT_SHIFT;
         assert!(add <= Self::MAX_PERMITS - current, "permits overflow");
         state + (add << PERMIT_SHIFT)
     }
 
+    #[inline(always)]
+    const fn check_acquire_permits(state: QueueState, acquire: u32) -> Option<QueueState> {
+        if state & CLOSED != 0 {
+            return None;
+        }
+        state.checked_sub((acquire as usize) << PERMIT_SHIFT)
+    }
+
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new(permits: usize) -> Self {
-        Self(Queue::with_state(Self::check_permits(0, permits)))
+        Self(Queue::with_state(Self::check_add_permits(0, permits)))
     }
 
     #[inline]
@@ -50,7 +58,7 @@ impl Semaphore {
     #[inline]
     pub fn add_permits(&self, n: usize) {
         self.0.fetch_update_state_with_lock(
-            |state| Self::check_permits(state, n),
+            |state| Self::check_add_permits(state, n),
             |locked| self.add_permits_locked(n, locked),
         );
     }
@@ -83,7 +91,7 @@ impl Semaphore {
             }
             drop(locked);
             wakers.drain(..).for_each(Waker::wake);
-            match (self.0).fetch_update_state_or_lock(|state| Self::check_permits(state, n)) {
+            match (self.0).fetch_update_state_or_lock(|state| Self::check_add_permits(state, n)) {
                 Some(l) => locked = l,
                 None => return,
             }
@@ -109,27 +117,13 @@ impl Semaphore {
     }
 
     #[inline]
-    pub async fn acquire_many(&self, n: u32) -> Result<SemaphorePermit<'_>, AcquireError> {
-        match (self.0).fetch_update_state(|state| {
-            if state & CLOSED != 0 {
-                return None;
-            }
-            state.checked_sub((n as usize) << PERMIT_SHIFT)
-        }) {
-            Ok(_) => {}
-            Err(Some(state)) if state & CLOSED != 0 => return Err(AcquireError(())),
-            Err(_) => {
-                Acquire {
-                    node: Node::new(SemaphoreRef(self)),
-                    permits: n,
-                }
-                .await?;
-            }
+    pub async fn acquire_many(&self, permits: u32) -> Result<SemaphorePermit<'_>, AcquireError> {
+        let acquire = |state| Self::check_acquire_permits(state, permits);
+        if self.0.fetch_update_state(acquire).is_err() {
+            let node = Node::new(SemaphoreRef(self));
+            Acquire { node, permits }.await?;
         }
-        Ok(SemaphorePermit {
-            sem: self,
-            permits: n,
-        })
+        Ok(SemaphorePermit { sem: self, permits })
     }
 
     #[inline]
@@ -138,13 +132,10 @@ impl Semaphore {
     }
 
     #[inline]
-    pub fn try_acquire_many(&self, n: u32) -> Result<SemaphorePermit<'_>, TryAcquireError> {
-        let n = n as usize;
-        match (self.0).fetch_update_state(|state| state.checked_sub(n << PERMIT_SHIFT)) {
-            Ok(_) => Ok(SemaphorePermit {
-                sem: self,
-                permits: n as _,
-            }),
+    pub fn try_acquire_many(&self, permits: u32) -> Result<SemaphorePermit<'_>, TryAcquireError> {
+        let acquire = |state| Self::check_acquire_permits(state, permits);
+        match self.0.fetch_update_state(acquire) {
+            Ok(_) => Ok(SemaphorePermit { sem: self, permits }),
             Err(Some(state)) if state & CLOSED != 0 => Err(TryAcquireError::Closed),
             Err(_) => Err(TryAcquireError::NoPermits),
         }
@@ -175,13 +166,10 @@ impl Semaphore {
     #[inline]
     pub fn try_acquire_many_owned(
         self: Arc<Self>,
-        n: u32,
+        permits: u32,
     ) -> Result<OwnedSemaphorePermit, TryAcquireError> {
-        mem::forget(self.try_acquire_many(n)?);
-        Ok(OwnedSemaphorePermit {
-            sem: self,
-            permits: n as _,
-        })
+        mem::forget(self.try_acquire_many(permits)?);
+        Ok(OwnedSemaphorePermit { sem: self, permits })
     }
 
     pub fn close(&self) {
@@ -239,10 +227,7 @@ impl<'a> Acquire<'a> {
         match this.node.state() {
             NodeState::Unqueued(mut waiter) => loop {
                 let Err(state) = waiter.queue().0.0.fetch_update_state(|state| {
-                    if state & CLOSED != 0 {
-                        return None;
-                    }
-                    state.checked_sub((*this.permits as usize) << PERMIT_SHIFT)
+                    Semaphore::check_acquire_permits(state, *this.permits)
                 }) else {
                     break Poll::Ready(Ok(()));
                 };
@@ -255,10 +240,7 @@ impl<'a> Acquire<'a> {
                 });
                 match waiter.try_enqueue_with_queue_state(state) {
                     Ok(_) => break Poll::Pending,
-                    Err(w) => {
-                        waiter = w;
-                        std::hint::spin_loop();
-                    }
+                    Err(w) => waiter = w,
                 }
             },
             NodeState::Queued(waiter) if waiter.queue().0.is_closed() => {
