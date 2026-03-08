@@ -43,7 +43,6 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(not(loom))]
 #[cfg(feature = "lock_api")]
 unsafe impl<M: lock_api::RawMutex> Mutex for M {
     const INIT: Self = <Self as lock_api::RawMutex>::INIT;

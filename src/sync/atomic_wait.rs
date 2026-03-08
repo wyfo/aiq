@@ -1,6 +1,5 @@
 use core::sync::atomic::{AtomicU32, Ordering::*};
 
-#[cfg(not(loom))]
 use crate::sync::parker::Parker;
 
 #[derive(Debug)]
@@ -12,7 +11,6 @@ impl AtomicParker {
     const PARKED: u32 = u32::MAX;
 }
 
-#[cfg(not(loom))]
 // SAFETY: implementation taken for std Parker futex implementation
 unsafe impl Parker for AtomicParker {
     #[allow(clippy::declare_interior_mutable_const)]

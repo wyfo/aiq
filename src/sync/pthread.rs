@@ -9,7 +9,6 @@ use core::{
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering::*},
 };
 
-#[cfg(not(loom))]
 use crate::sync::{mutex::Mutex, parker::Parker};
 
 fn unwrap(err_code: i32) {
@@ -100,7 +99,6 @@ impl PthreadMutex {
     }
 }
 
-#[cfg(not(loom))]
 unsafe impl Mutex for PthreadMutex {
     const INIT: Self = Self(LazyBox::new());
     type Guard<'a>
@@ -156,7 +154,6 @@ impl PthreadParker {
     const PARKED: usize = usize::MAX;
 }
 
-#[cfg(not(loom))]
 // SAFETY: implementation inspired for std Parker futex/pthread implementation
 unsafe impl Parker for PthreadParker {
     #[allow(clippy::declare_interior_mutable_const)]
