@@ -6,11 +6,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use aiq::{
-    Node, NodeState, Queue,
-    queue::{LockedQueue, QueueState},
-    queue_ref,
-};
+use aiq::{Node, NodeState, Queue, queue::LockedQueue, queue_ref};
 use arrayvec::ArrayVec;
 use pin_project_lite::pin_project;
 
@@ -24,20 +20,20 @@ struct Waiter {
 }
 
 #[derive(Default)]
-pub struct Semaphore(Queue<Waiter>);
+pub struct Semaphore(Queue<Waiter, usize>);
 
 impl Semaphore {
     pub const MAX_PERMITS: usize = usize::MAX >> 3;
 
     #[inline(always)]
-    const fn check_add_permits(state: QueueState, add: usize) -> QueueState {
+    const fn check_add_permits(state: usize, add: usize) -> usize {
         let current = state >> PERMIT_SHIFT;
         assert!(add <= Self::MAX_PERMITS - current, "permits overflow");
         state + (add << PERMIT_SHIFT)
     }
 
     #[inline(always)]
-    const fn check_acquire_permits(state: QueueState, acquire: u32) -> Option<QueueState> {
+    const fn check_acquire_permits(state: usize, acquire: u32) -> Option<usize> {
         if state & CLOSED != 0 {
             return None;
         }
@@ -56,34 +52,38 @@ impl Semaphore {
     }
 
     #[inline]
-    pub fn add_permits(&self, n: usize) {
+    pub fn add_permits(&self, permits: usize) {
+        if permits == 0 {
+            return;
+        }
         self.0.fetch_update_state_with_lock(
-            |state| Self::check_add_permits(state, n),
-            |locked| self.add_permits_locked(n, locked),
+            |state| Self::check_add_permits(state, permits),
+            |locked| self.add_permits_locked(permits, locked),
         );
     }
 
-    fn add_permits_locked<'a>(&'a self, mut n: usize, mut locked: LockedQueue<'a, Waiter>) {
-        if n == 0 {
-            return;
-        }
+    fn add_permits_locked<'a>(
+        &'a self,
+        mut permits: usize,
+        mut locked: LockedQueue<'a, Waiter, usize>,
+    ) {
         let mut wakers = ArrayVec::<Waker, 32>::new();
         'outer: loop {
             loop {
                 let mut waiter = locked.dequeue().unwrap();
                 let requeue = waiter.with_data_mut(|mut waiter| {
-                    if waiter.permits as usize > n {
-                        waiter.permits -= n as u32;
+                    if waiter.permits as usize > permits {
+                        waiter.permits -= permits as u32;
                         return true;
                     }
-                    n -= waiter.permits as usize;
+                    permits -= waiter.permits as usize;
                     wakers.push(waiter.waker.take().unwrap());
                     false
                 });
                 if requeue {
                     waiter.requeue();
                     break 'outer;
-                } else if waiter.try_set_queue_state(n << PERMIT_SHIFT) || n == 0 {
+                } else if waiter.try_set_queue_state(permits << PERMIT_SHIFT) || permits == 0 {
                     break 'outer;
                 } else if wakers.is_full() {
                     break;
@@ -91,7 +91,9 @@ impl Semaphore {
             }
             drop(locked);
             wakers.drain(..).for_each(Waker::wake);
-            match (self.0).fetch_update_state_or_lock(|state| Self::check_add_permits(state, n)) {
+            match (self.0)
+                .fetch_update_state_or_lock(|state| Self::check_add_permits(state, permits))
+            {
                 Some(l) => locked = l,
                 None => return,
             }
@@ -101,14 +103,14 @@ impl Semaphore {
     }
 
     #[inline]
-    pub fn forget_permits(&self, n: usize) -> usize {
-        if n == 0 {
+    pub fn forget_permits(&self, permits: usize) -> usize {
+        if permits == 0 {
             return 0;
         }
         let state = (self.0)
-            .fetch_update_state(|state| Some(state.wrapping_sub(n << PERMIT_SHIFT)))
+            .fetch_update_state(|state| Some(state.wrapping_sub(permits << PERMIT_SHIFT)))
             .unwrap_or(0);
-        min(n, state >> PERMIT_SHIFT)
+        min(permits, state >> PERMIT_SHIFT)
     }
 
     #[inline]
@@ -149,13 +151,10 @@ impl Semaphore {
     #[inline]
     pub async fn acquire_many_owned(
         self: Arc<Self>,
-        n: u32,
+        permits: u32,
     ) -> Result<OwnedSemaphorePermit, AcquireError> {
         mem::forget(self.acquire().await?);
-        Ok(OwnedSemaphorePermit {
-            sem: self,
-            permits: n,
-        })
+        Ok(OwnedSemaphorePermit { sem: self, permits })
     }
 
     #[inline]
@@ -194,7 +193,12 @@ impl Semaphore {
 }
 
 struct SemaphoreRef<'a>(&'a Semaphore);
-queue_ref!(SemaphoreRef<'a>, NodeData = Waiter, &self.0.0);
+queue_ref!(
+    SemaphoreRef<'a>,
+    NodeData = Waiter,
+    State = usize,
+    &self.0.0
+);
 
 #[derive(Debug)]
 pub struct AcquireError(());

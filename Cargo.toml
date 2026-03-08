@@ -10,7 +10,6 @@ atomic-wait = ["dep:atomic-wait"]
 lock_api = ["dep:lock_api"]
 parking_lot = ["dep:parking_lot", "lock_api"]
 pthread = ["dep:libc", "alloc"]
-queue-state = []
 std = ["alloc"]
 
 [dependencies]
@@ -38,49 +37,8 @@ loom = { version = "0.7.2", features = ["futures"] }
 [lib]
 test = false
 
-[[example]]
-name = "notify"
-required-features = ["queue-state"]
-
-[[example]]
-name = "semaphore"
-required-features = ["queue-state"]
-
-[[test]]
-name = "loom_notify"
-required-features = ["queue-state"]
-
-[[test]]
-name = "loom_semaphore"
-required-features = ["queue-state"]
-
-[[test]]
-name = "miri_notify"
-required-features = ["queue-state"]
-
-[[test]]
-name = "miri_semaphore"
-required-features = ["queue-state"]
-
-[[test]]
-name = "notify"
-required-features = ["queue-state"]
-
-[[test]]
-name = "notify_owned"
-required-features = ["queue-state"]
-
-[[test]]
-name = "semaphore"
-required-features = ["queue-state"]
-
-[[test]]
-name = "semaphore_owned"
-required-features = ["queue-state"]
-
 [[bench]]
 name = "notify"
-required-features = ["queue-state"]
 harness = false
 
 [[bench]]
@@ -89,7 +47,6 @@ harness = false
 
 [[bench]]
 name = "semaphore"
-required-features = ["queue-state"]
 harness = false
 
 [[bench]]

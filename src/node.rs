@@ -7,9 +7,7 @@ use core::{hint::unreachable_unchecked, pin::Pin, ptr, ptr::NonNull};
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicPtr, Ordering::*};
 
-#[cfg(feature = "queue-state")]
-use crate::queue::state::*;
-use crate::queue::{LockedQueue, QueueRef};
+use crate::queue::{QueueRef, StateOrPtr};
 #[cfg(not(nightly))]
 use crate::unsafe_pinned::UnsafePinned;
 
@@ -179,11 +177,10 @@ impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
         unsafe { self.queue.queue().enqueue(self.node.cast(), |_| true) };
     }
 
-    #[cfg(feature = "queue-state")]
     #[inline]
-    pub fn try_enqueue_with_queue_state(self, state: Option<QueueState>) -> Result<(), Self> {
-        let same_state = |tail| match StateOrTail::from(tail) {
-            StateOrTail::State(s) => state == Some(s),
+    pub fn try_enqueue_with_queue_state(self, state: Option<Q::State>) -> Result<(), Self> {
+        let same_state = |tail| match StateOrPtr::from(tail) {
+            StateOrPtr::State(s) => state == Some(s),
             _ => state.is_none(),
         };
         if unsafe { self.queue.queue().enqueue(self.node.cast(), same_state) } {
@@ -194,10 +191,14 @@ impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
     }
 }
 
+#[expect(type_alias_bounds)]
+type LockedQueue<'a, Q: QueueRef> =
+    crate::queue::LockedQueue<'a, Q::NodeData, Q::State, Q::SyncPrimitives>;
+
 pub struct NodeQueued<'a, Q: QueueRef> {
     node: NonNull<NodeInner<Q::NodeData>>,
     queue: &'a Q,
-    locked: LockedQueue<'a, Q::NodeData, Q::SyncPrimitives>,
+    locked: LockedQueue<'a, Q>,
 }
 
 node_getters!(NodeQueued<'a, Q: QueueRef>, Q::NodeData);
@@ -207,23 +208,19 @@ impl<'a, Q: QueueRef> NodeQueued<'a, Q> {
         self.queue
     }
 
-    pub fn dequeue(mut self) -> (&'a Q, LockedQueue<'a, Q::NodeData, Q::SyncPrimitives>) {
+    pub fn dequeue(mut self) -> (&'a Q, LockedQueue<'a, Q>) {
         let node = unsafe { self.node.cast().as_ref() };
         unsafe { self.locked.remove(node, ptr::null_mut(), false) };
         (self.queue, self.locked)
     }
 
-    #[cfg(feature = "queue-state")]
     #[allow(clippy::type_complexity)]
     pub fn dequeue_try_set_queue_state(
         mut self,
-        state: QueueState,
-    ) -> Result<
-        (&'a Q, LockedQueue<'a, Q::NodeData, Q::SyncPrimitives>),
-        (&'a Q, LockedQueue<'a, Q::NodeData, Q::SyncPrimitives>),
-    > {
+        state: Q::State,
+    ) -> Result<(&'a Q, LockedQueue<'a, Q>), (&'a Q, LockedQueue<'a, Q>)> {
         let node = unsafe { self.node.cast().as_ref() };
-        if unsafe { (self.locked).remove(node, StateOrTail::State(state).into(), false) } {
+        if unsafe { (self.locked).remove(node, StateOrPtr::State(state).into(), false) } {
             Ok((self.queue, self.locked))
         } else {
             Err((self.queue, self.locked))

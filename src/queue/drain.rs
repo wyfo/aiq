@@ -1,6 +1,7 @@
 #[cfg(not(loom))]
 use core::sync::atomic::{AtomicPtr, Ordering::*};
 use core::{
+    hint::unreachable_unchecked,
     pin::{Pin, pin},
     ptr,
     ptr::NonNull,
@@ -9,34 +10,33 @@ use core::{
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicPtr, Ordering::*};
 
-#[cfg(feature = "queue-state")]
-use crate::queue::state::*;
 use crate::{
     Queue,
     node::node_getters,
-    queue::{LockedQueue, NodeLink},
+    queue::{
+        LockedQueue, NodeLink, QueueState,
+        state::{StateOrPtr, Tail},
+    },
     sync::{DefaultSyncPrimitives, SyncPrimitives},
 };
 
-pub struct Drain<'a, T, S: SyncPrimitives + 'a = DefaultSyncPrimitives> {
+pub struct Drain<'a, T, S: QueueState = (), SP: SyncPrimitives + 'a = DefaultSyncPrimitives> {
     sentinel_node: NodeLink,
-    queue: &'a Queue<T, S>,
-    locked: Option<LockedQueue<'a, T, S>>,
+    queue: &'a Queue<T, S, SP>,
+    locked: Option<LockedQueue<'a, T, S, SP>>,
 }
 
-impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
-    pub(super) fn new(locked: LockedQueue<'a, T, S>, new_tail: *mut NodeLink) -> Self {
+impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
+    pub(super) fn new(locked: LockedQueue<'a, T, S, SP>, new_tail: *mut Tail<S>) -> Self {
         let mut head = ptr::null_mut();
         let mut tail = ptr::null_mut();
         if locked.tail().is_some() {
             head = locked.get_next(&locked.queue.head).as_ptr();
             locked.head.store(ptr::null_mut(), Relaxed);
-            tail = locked.tail.swap(new_tail, SeqCst);
-            #[cfg(feature = "queue-state")]
-            match tail.into() {
-                StateOrTail::Tail(t) => tail = t.as_ptr(),
-                _ => unsafe { core::hint::unreachable_unchecked() },
-            };
+            match locked.tail.swap(new_tail, SeqCst).into() {
+                StateOrPtr::Ptr(ptr) => tail = ptr.as_ptr(),
+                _ => unsafe { unreachable_unchecked() },
+            }
         }
         Self {
             sentinel_node: NodeLink {
@@ -63,11 +63,11 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
     }
 
     #[inline]
-    pub fn next(self: Pin<&mut Self>) -> Option<NodeDrained<'a, '_, T, S>> {
+    pub fn next(self: Pin<&mut Self>) -> Option<NodeDrained<'a, '_, T, S, SP>> {
         (unsafe { self.get_unchecked_mut() }).next_impl()
     }
 
-    fn next_impl(&mut self) -> Option<NodeDrained<'a, '_, T, S>> {
+    fn next_impl(&mut self) -> Option<NodeDrained<'a, '_, T, S, SP>> {
         if self.locked.is_none() {
             self.lock();
         }
@@ -123,21 +123,30 @@ impl<'a, T, S: SyncPrimitives> Drain<'a, T, S> {
     }
 }
 
-impl<'a, T, S: SyncPrimitives> Drop for Drain<'a, T, S> {
+impl<'a, T, S: QueueState, SP: SyncPrimitives> Drop for Drain<'a, T, S, SP> {
     fn drop(&mut self) {
         self.locked.get_or_insert_with(|| self.queue.lock());
         while self.next_impl().is_some() {}
     }
 }
 
-pub struct NodeDrained<'drain, 'a, T, S: SyncPrimitives = DefaultSyncPrimitives> {
+pub struct NodeDrained<
+    'drain,
+    'a,
+    T,
+    S: QueueState = (),
+    SP: SyncPrimitives = DefaultSyncPrimitives,
+> {
     node: NonNull<NodeLink>,
-    drain: &'a mut Drain<'drain, T, S>,
+    drain: &'a mut Drain<'drain, T, S, SP>,
 }
 
-node_getters!(NodeDrained<'drain, 'a, T, S: SyncPrimitives>, T);
+node_getters!(
+    NodeDrained<'drain, 'a, T, S: QueueState, SP: SyncPrimitives>,
+    T
+);
 
-impl<T, S: SyncPrimitives> Drop for NodeDrained<'_, '_, T, S> {
+impl<T, S: QueueState, SP: SyncPrimitives> Drop for NodeDrained<'_, '_, T, S, SP> {
     fn drop(&mut self) {
         let next = if self.node == self.drain.sentinel_node.prev().into() {
             ptr::null_mut()

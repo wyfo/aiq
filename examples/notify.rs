@@ -7,18 +7,14 @@ use std::{
     task::{Context, Poll, Waker, ready},
 };
 
-use aiq::{
-    Node, NodeState, Queue,
-    queue::{LockedQueue, QueueState},
-    queue_ref,
-};
+use aiq::{Node, NodeState, Queue, queue::LockedQueue, queue_ref};
 use arrayvec::ArrayVec;
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use pin_project_lite::pin_project;
 
-const STATE_UNNOTIFIED: QueueState = 0;
-const STATE_NOTIFIED: QueueState = 1;
+const STATE_UNNOTIFIED: usize = 0;
+const STATE_NOTIFIED: usize = 1;
 
 #[derive(Default)]
 struct Waiter {
@@ -35,7 +31,7 @@ enum Notification {
 
 #[derive(Default)]
 pub struct Notify {
-    queue: Queue<Waiter>,
+    queue: Queue<Waiter, usize>,
     generation: AtomicU64,
 }
 
@@ -57,7 +53,11 @@ impl Notify {
         );
     }
 
-    fn wake_single<'a>(&'a self, notification: Notification, mut locked: LockedQueue<'a, Waiter>) {
+    fn wake_single<'a>(
+        &'a self,
+        notification: Notification,
+        mut locked: LockedQueue<'a, Waiter, usize>,
+    ) {
         let waker;
         match notification {
             Notification::One => {
@@ -136,7 +136,7 @@ impl Notify {
 }
 
 struct NotifyRef<N>(N);
-queue_ref!(NotifyRef<N: Deref<Target = Notify>>, NodeData = Waiter, &self.0.queue);
+queue_ref!(NotifyRef<N: Deref<Target = Notify>>, NodeData = Waiter, State = usize, &self.0.queue);
 
 pin_project! {
     struct NotifiedInner<N: Deref<Target = Notify>> {

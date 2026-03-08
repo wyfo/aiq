@@ -8,7 +8,7 @@ A concurrent intrusive queue for building async primitives.
 - `#[no_std]`, with optional `alloc`/`std` features
 - Lockless enqueuing: multiple nodes can be enqueued concurrently while another is being dequeued; dequeuing requires locking
 - Generic `Mutex`/`Parker` traits, with default implementations for std, pthread, spin, and `atomic-wait`/`parking_lot`
-- Optional atomic state embedded in the queue when empty (`queue-state` feature)
+- Optional atomic state embedded in the queue when empty
 
 ## Usage
 
@@ -45,7 +45,6 @@ See [examples](examples) for full implementations of `tokio::sync::Notify` and `
 | `lock_api` | `lock_api::RawMutex` trait implementation |
 | `parking_lot` | `parking_lot` mutex; implies `lock_api` |
 | `pthread` | Raw pthread mutex and condition variable; implies `alloc` |
-| `queue-state` | Provides a `usize` state with CAS updates when the queue is empty |
 
 Without any features enabled, the library falls back to spin-based mutex and parker.
 
