@@ -58,16 +58,26 @@ impl Notify {
     }
 
     fn wake_single<'a>(&'a self, notification: Notification, mut locked: LockedQueue<'a, Waiter>) {
-        let mut waiter = match notification {
-            Notification::One => locked.dequeue().unwrap(),
-            Notification::Last => locked.pop().unwrap(),
+        let waker;
+        match notification {
+            Notification::One => {
+                let mut waiter = locked.dequeue().unwrap();
+                waker = waiter.with_data_mut(|mut waiter| {
+                    waiter.notification = Some(notification);
+                    waiter.waker.take()
+                });
+                waiter.try_set_queue_state(STATE_UNNOTIFIED);
+            }
+            Notification::Last => {
+                let mut waiter = locked.pop().unwrap();
+                waker = waiter.with_data_mut(|mut waiter| {
+                    waiter.notification = Some(notification);
+                    waiter.waker.take()
+                });
+                waiter.try_set_queue_state(STATE_UNNOTIFIED);
+            }
             _ => unreachable!(),
-        };
-        let waker = waiter.with_data_mut(|mut waiter| {
-            waiter.notification = Some(notification);
-            waiter.waker.take()
-        });
-        waiter.try_set_queue_state(STATE_UNNOTIFIED);
+        }
         drop(locked);
         if let Some(waker) = waker {
             waker.wake();

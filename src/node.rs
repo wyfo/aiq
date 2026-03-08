@@ -148,7 +148,7 @@ impl<Q: QueueRef> Node<Q> {
     fn dequeue(&mut self) {
         let mut locked = self.queue.queue().lock();
         if self.raw_state() == RawNodeState::Queued {
-            unsafe { locked.remove(&(*self.node.get()).link, ptr::null_mut()) };
+            unsafe { locked.remove(&(*self.node.get()).link, ptr::null_mut(), false) };
         }
     }
 }
@@ -239,7 +239,7 @@ impl<'a, Q: QueueRef> NodeQueued<'a, Q> {
 
     pub fn dequeue(mut self) -> (&'a Q, LockedQueue<'a, Q::NodeData, Q::SyncPrimitives>) {
         let node = unsafe { self.node.cast().as_ref() };
-        unsafe { self.locked.remove(node, ptr::null_mut()) };
+        unsafe { self.locked.remove(node, ptr::null_mut(), false) };
         (self.queue, self.locked)
     }
 
@@ -253,7 +253,7 @@ impl<'a, Q: QueueRef> NodeQueued<'a, Q> {
         (&'a Q, LockedQueue<'a, Q::NodeData, Q::SyncPrimitives>),
     > {
         let node = unsafe { self.node.cast().as_ref() };
-        if unsafe { (self.locked).remove(node, StateOrTail::State(state).into()) } {
+        if unsafe { (self.locked).remove(node, StateOrTail::State(state).into(), false) } {
             Ok((self.queue, self.locked))
         } else {
             Err((self.queue, self.locked))
