@@ -171,13 +171,13 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     #[inline]
     pub fn try_update_state(
         &self,
-        prev_state: QueueState,
-        new_state: QueueState,
+        current: QueueState,
+        new: QueueState,
     ) -> Result<QueueState, Option<QueueState>> {
-        let prev = StateOrTail::State(prev_state).into();
-        let new = StateOrTail::State(new_state).into();
-        match self.tail.compare_exchange_weak(prev, new, SeqCst, Acquire) {
-            Ok(_) => Ok(prev_state),
+        let cur = StateOrTail::State(current).into();
+        let new = StateOrTail::State(new).into();
+        match self.tail.compare_exchange_weak(cur, new, SeqCst, Acquire) {
+            Ok(_) => Ok(current),
             Err(ptr) => Err(StateOrTail::from(ptr).state()),
         }
     }
