@@ -237,29 +237,30 @@ impl<'a> Acquire<'a> {
     fn poll_acquire(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), AcquireError>> {
         let this = self.project();
         match this.node.state() {
-            NodeState::Unqueued(waiter) => {
-                match waiter.fetch_update_queue_state_or_enqueue(
-                    |state| {
-                        if state & CLOSED != 0 {
-                            return None;
-                        }
-                        state.checked_sub((*this.permits as usize) << PERMIT_SHIFT)
-                    },
-                    |state, mut waiter| {
-                        waiter.permits = match state {
-                            Some(s) if s & CLOSED != 0 => return false,
-                            Some(s) => *this.permits - (s as u32 >> PERMIT_SHIFT),
-                            None => *this.permits,
-                        };
-                        waiter.waker.get_or_insert_with(|| cx.waker().clone());
-                        true
-                    },
-                ) {
-                    Ok(_) => Poll::Ready(Ok(())),
-                    Err(Some(state)) if state & CLOSED != 0 => Poll::Ready(Err(AcquireError(()))),
-                    Err(_) => Poll::Pending,
+            NodeState::Unqueued(mut waiter) => loop {
+                let Err(state) = waiter.queue().0.0.fetch_update_state(|state| {
+                    if state & CLOSED != 0 {
+                        return None;
+                    }
+                    state.checked_sub((*this.permits as usize) << PERMIT_SHIFT)
+                }) else {
+                    break Poll::Ready(Ok(()));
+                };
+                if state.is_some_and(|s| s & CLOSED != 0) {
+                    break Poll::Ready(Err(AcquireError(())));
                 }
-            }
+                waiter.with_data_mut(|mut waiter| {
+                    waiter.permits = *this.permits - (state.unwrap_or(0) as u32 >> PERMIT_SHIFT);
+                    waiter.waker.get_or_insert_with(|| cx.waker().clone());
+                });
+                match waiter.try_enqueue_with_queue_state(state) {
+                    Ok(_) => break Poll::Pending,
+                    Err(w) => {
+                        waiter = w;
+                        std::hint::spin_loop();
+                    }
+                }
+            },
             NodeState::Queued(waiter) if waiter.queue().0.is_closed() => {
                 Poll::Ready(Err(AcquireError(())))
             }

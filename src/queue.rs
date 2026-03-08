@@ -156,10 +156,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     #[cfg(feature = "queue-state")]
     #[inline]
     pub fn state(&self) -> Option<QueueState> {
-        match self.load_tail().into() {
-            StateOrTail::State(state) => Some(state),
-            _ => None,
-        }
+        StateOrTail::from(self.load_tail()).state()
     }
 
     #[inline]
@@ -168,6 +165,21 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         return self.state().is_some();
         #[cfg(not(feature = "queue-state"))]
         return self.load_tail().is_null();
+    }
+
+    #[cfg(feature = "queue-state")]
+    #[inline]
+    pub fn try_update_state(
+        &self,
+        prev_state: QueueState,
+        new_state: QueueState,
+    ) -> Result<QueueState, Option<QueueState>> {
+        let prev = StateOrTail::State(prev_state).into();
+        let new = StateOrTail::State(new_state).into();
+        match self.tail.compare_exchange_weak(prev, new, SeqCst, Acquire) {
+            Ok(_) => Ok(prev_state),
+            Err(ptr) => Err(StateOrTail::from(ptr).state()),
+        }
     }
 
     #[cfg(feature = "queue-state")]
@@ -254,38 +266,31 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
     pub(crate) unsafe fn enqueue(
         &self,
         node: NonNull<NodeLink>,
-        mut new_tail: impl FnMut(*mut NodeLink) -> Option<(*mut NodeLink, Option<*mut NodeLink>)>,
-    ) -> Option<*mut NodeLink> {
-        let mut backoff = 0;
-        #[cold]
-        #[inline(never)]
-        fn spin(backoff: usize) -> usize {
-            for _ in 0..1 << backoff {
-                hint::spin_loop();
-            }
-            backoff + if backoff < 6 { 1 } else { 0 }
-        }
+        mut check_tail: impl FnMut(*mut NodeLink) -> bool,
+    ) -> bool {
         let mut tail = self.tail.load(Relaxed);
         let prev = loop {
-            let Some((new_tail, prev)) = new_tail(tail) else {
+            if !check_tail(tail) {
                 atomic::fence(Acquire);
                 unsafe { node.as_ref().prev.store(ptr::null_mut(), Relaxed) }
-                return Some(tail);
-            };
-            let prev = prev.map(|p| NonNull::new(p).or_else(|| NonNull::new(IS_HEAD)).unwrap());
-            let prev_ptr = prev.map_or(ptr::null_mut(), NonNull::as_ptr);
-            unsafe { node.as_ref().prev.store(prev_ptr, Relaxed) }
-            if ((self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Relaxed)).is_ok() {
-                break prev?;
+                return false;
             }
-            backoff = spin(backoff);
-            tail = self.tail.load(Relaxed);
+            #[cfg(not(feature = "queue-state"))]
+            let prev = NonNull::new(tail);
+            #[cfg(feature = "queue-state")]
+            let prev = StateOrTail::from(tail).tail();
+            let prev_ptr = prev.map_or(IS_HEAD, NonNull::as_ptr);
+            unsafe { node.as_ref().prev.store(prev_ptr, Relaxed) };
+            #[cfg(not(feature = "queue-state"))]
+            let new_tail = node.as_ptr();
+            #[cfg(feature = "queue-state")]
+            let new_tail = StateOrTail::Tail(node).into();
+            match (self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Relaxed) {
+                Ok(_) => break prev,
+                Err(t) => tail = t,
+            }
         };
-        let prev_next = NonNull::from(if prev.as_ptr() == IS_HEAD {
-            &self.head
-        } else {
-            unsafe { &prev.as_ref().next }
-        });
+        let prev_next = NonNull::from(prev.map_or(&self.head, |p| unsafe { &p.as_ref().next }));
         #[cfg(not(any(target_arch = "x86_64", loom)))]
         unsafe { prev_next.as_ref() }.store(node.as_ptr(), SeqCst);
         #[cfg(not(any(target_arch = "x86_64", loom)))]
@@ -296,7 +301,7 @@ impl<T, S: SyncPrimitives> Queue<T, S> {
         if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), SeqCst)).is_null() } {
             self.unpark();
         }
-        Some(tail)
+        true
     }
 
     #[cold]
@@ -329,10 +334,7 @@ impl<'a, T, S: SyncPrimitives> LockedQueue<'a, T, S> {
         #[cfg(not(feature = "queue-state"))]
         return NonNull::new(self.load_tail());
         #[cfg(feature = "queue-state")]
-        return match self.load_tail().into() {
-            StateOrTail::Tail(tail) => Some(tail),
-            _ => None,
-        };
+        return StateOrTail::from(self.load_tail()).tail();
     }
 
     #[inline(always)]

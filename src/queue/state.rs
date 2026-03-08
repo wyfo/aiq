@@ -27,6 +27,22 @@ pub(super) const fn state_to_ptr(state: QueueState) -> *mut NodeLink {
     ptr::without_provenance_mut(state << STATE_SHIFT)
 }
 
+impl StateOrTail {
+    pub(super) fn state(self) -> Option<QueueState> {
+        match self {
+            Self::State(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(super) fn tail(self) -> Option<NonNull<NodeLink>> {
+        match self {
+            Self::Tail(tail) => Some(tail),
+            _ => None,
+        }
+    }
+}
+
 impl From<*mut NodeLink> for StateOrTail {
     #[inline(always)]
     fn from(value: *mut NodeLink) -> Self {

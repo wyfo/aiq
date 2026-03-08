@@ -168,37 +168,34 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
     fn poll_notified_impl(self: Pin<&mut Self>, cx: Option<&mut Context<'_>>) -> Poll<bool> {
         let mut this = self.project();
         match this.node.as_mut().state() {
-            NodeState::Unqueued(waiter) => {
+            NodeState::Unqueued(mut waiter) => loop {
+                if waiter.queue().0.generation.load(SeqCst) != *this.generation {
+                    break Poll::Ready(false);
+                }
+                let Err(state) = waiter.queue().0.queue.fetch_update_state(|state| {
+                    (state == STATE_NOTIFIED).then_some(STATE_UNNOTIFIED)
+                }) else {
+                    break Poll::Ready(false);
+                };
+                if let Some(cx) = cx.as_ref() {
+                    waiter.with_data_mut(|mut waiter| {
+                        waiter.waker.get_or_insert_with(|| cx.waker().clone());
+                    });
+                }
                 let notify = waiter.queue();
-                let mut enqueued = true;
-                match waiter.fetch_update_queue_state_or_enqueue(
-                    |state| (state == STATE_NOTIFIED).then_some(STATE_UNNOTIFIED),
-                    |_, mut waiter| {
-                        if notify.0.generation.load(SeqCst) != *this.generation {
-                            enqueued = false;
-                            return false;
-                        }
-                        if let Some(cx) = cx.as_ref() {
-                            waiter.waker.get_or_insert_with(|| cx.waker().clone());
-                        }
-                        true
-                    },
-                ) {
-                    Ok(_) => Poll::Ready(false),
+                match waiter.try_enqueue_with_queue_state(state) {
                     #[cfg(not(loom))]
-                    Err(_) if !enqueued || notify.0.generation.load(SeqCst) != *this.generation => {
-                        Poll::Ready(enqueued)
+                    Ok(_) if notify.0.generation.load(SeqCst) != *this.generation => {
+                        break Poll::Ready(true);
                     }
                     #[cfg(loom)]
-                    Err(_)
-                        if !enqueued
-                            || notify.0.generation.fetch_add(0, SeqCst) != *this.generation =>
-                    {
-                        Poll::Ready(enqueued)
+                    Ok(_) if notify.0.generation.fetch_add(0, SeqCst) != *this.generation => {
+                        break Poll::Ready(true);
                     }
-                    Err(_) => Poll::Pending,
+                    Ok(_) => break Poll::Pending,
+                    Err(w) => waiter = w,
                 }
-            }
+            },
             NodeState::Queued(waiter)
                 if waiter.queue().0.generation.load(SeqCst) != *this.generation =>
             {

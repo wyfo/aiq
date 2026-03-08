@@ -176,50 +176,20 @@ impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
 
     #[inline]
     pub fn enqueue(self) {
-        #[cfg(feature = "queue-state")]
-        let new_tail = |tail| {
-            let prev = match StateOrTail::from(tail) {
-                StateOrTail::Tail(tail) => tail.as_ptr(),
-                _ => ptr::null_mut(),
-            };
-            Some((StateOrTail::Tail(self.node.cast()).into(), Some(prev)))
-        };
-        #[cfg(not(feature = "queue-state"))]
-        let new_tail = |tail| Some((self.node.as_ptr().cast(), Some(tail)));
-        unsafe { self.queue.queue().enqueue(self.node.cast(), new_tail) };
+        unsafe { self.queue.queue().enqueue(self.node.cast(), |_| true) };
     }
 
     #[cfg(feature = "queue-state")]
-    pub fn fetch_update_queue_state_or_enqueue<
-        F: FnMut(QueueState) -> Option<QueueState>,
-        I: FnMut(Option<QueueState>, Pin<&mut Q::NodeData>) -> bool,
-    >(
-        mut self,
-        mut f: F,
-        mut init: I,
-    ) -> Result<(), Option<QueueState>> {
-        let Self { node, queue } = self;
-        let new_tail = |tail| match StateOrTail::from(tail) {
-            StateOrTail::State(state) => match f(state) {
-                Some(new_state) => Some((StateOrTail::State(new_state).into(), None)),
-                None if self.with_data_mut(|data| init(Some(state), data)) => Some((
-                    StateOrTail::Tail(self.node.cast()).into(),
-                    Some(ptr::null_mut()),
-                )),
-                None => None,
-            },
-            StateOrTail::Tail(tail) if self.with_data_mut(|data| init(None, data)) => Some((
-                StateOrTail::Tail(self.node.cast()).into(),
-                Some(tail.as_ptr()),
-            )),
-            StateOrTail::Tail(_) => None,
+    #[inline]
+    pub fn try_enqueue_with_queue_state(self, state: Option<QueueState>) -> Result<(), Self> {
+        let same_state = |tail| match StateOrTail::from(tail) {
+            StateOrTail::State(s) => state == Some(s),
+            _ => state.is_none(),
         };
-        match unsafe { queue.queue().enqueue(node.cast(), new_tail) } {
-            Some(tail) => Err(match tail.into() {
-                StateOrTail::State(state) => Some(state),
-                _ => None,
-            }),
-            None => Ok(()),
+        if unsafe { self.queue.queue().enqueue(self.node.cast(), same_state) } {
+            Ok(())
+        } else {
+            Err(self)
         }
     }
 }
