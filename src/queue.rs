@@ -349,13 +349,13 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
                 self.parked_next.store(ptr::null_mut(), SeqCst);
                 return next;
             }
+            unsafe { self.parker.park() };
             #[cfg(any(target_arch = "x86_64", loom))]
             let next = next.load(Acquire);
             #[cfg(any(target_arch = "x86_64", loom))]
             if next != PARKED {
                 return unsafe { NonNull::new_unchecked(next) };
             }
-            unsafe { self.parker.park() };
         }
     }
 

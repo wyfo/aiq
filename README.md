@@ -2,6 +2,8 @@
 
 A concurrent intrusive queue for building async primitives.
 
+See [here](algorithm.md) for a detailed explanation of the algorithm.
+
 ## Features
 
 - 100%[^1] safe API
