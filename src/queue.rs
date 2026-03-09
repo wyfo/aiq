@@ -102,7 +102,7 @@ macro_rules! __private_queue_ref {
     (@state $ty:ty) => { $ty };
 }
 
-const HEAD_MARKER: *mut NodeLink = ptr::without_provenance_mut(RawNodeState::Queued as _);
+const HEAD_MARKER: *mut NodeLink = RawNodeState::Queued.into_ptr();
 
 pub struct Queue<T, S: QueueState = (), SP: SyncPrimitives = DefaultSyncPrimitives> {
     tail: AtomicPtr<Tail<S>>,
@@ -279,7 +279,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
             self.unpark();
         }
         #[cfg(any(target_arch = "x86_64", loom))]
-        if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), SeqCst)).is_null() } {
+        if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), Release)).is_null() } {
             self.unpark();
         }
         true
@@ -320,7 +320,7 @@ pub struct LockedQueue<'a, T, S: QueueState = (), SP: SyncPrimitives = DefaultSy
 impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
     #[inline(always)]
     fn get_next(&self, next: &AtomicPtr<NodeLink>) -> NonNull<NodeLink> {
-        if let Some(next) = NonNull::new(next.load(SeqCst)) {
+        if let Some(next) = NonNull::new(next.load(Acquire)) {
             return next;
         }
         self.wait_for_next(next)
@@ -331,7 +331,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
     fn wait_for_next(&self, next: &AtomicPtr<NodeLink>) -> NonNull<NodeLink> {
         for _ in 0..SP::SPIN_BEFORE_PARK {
             hint::spin_loop();
-            if let Some(next) = NonNull::new(next.load(SeqCst)) {
+            if let Some(next) = NonNull::new(next.load(Acquire)) {
                 return next;
             }
         }
@@ -340,7 +340,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
         #[cfg(any(target_arch = "x86_64", loom))]
         const PARKED: *mut NodeLink = ptr::without_provenance_mut(1);
         #[cfg(any(target_arch = "x86_64", loom))]
-        if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, SeqCst) {
+        if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, Acquire) {
             return unsafe { NonNull::new_unchecked(next) };
         }
         loop {
@@ -350,7 +350,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
                 return next;
             }
             #[cfg(any(target_arch = "x86_64", loom))]
-            let next = next.load(SeqCst);
+            let next = next.load(Acquire);
             #[cfg(any(target_arch = "x86_64", loom))]
             if next != PARKED {
                 return unsafe { NonNull::new_unchecked(next) };
@@ -423,7 +423,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
             unsafe { next.as_ref().prev.store(prev, Relaxed) };
             prev_next.store(next.as_ptr(), Relaxed);
         }
-        node.dequeue();
+        node.prev.store(RawNodeState::Dequeued.into_ptr(), Release);
         is_head
     }
 }

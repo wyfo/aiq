@@ -12,7 +12,7 @@ use loom::sync::atomic::{AtomicPtr, Ordering::*};
 
 use crate::{
     Queue,
-    node::node_getters,
+    node::{RawNodeState, node_getters},
     queue::{
         LockedQueue, NodeLink, QueueState,
         state::{StateOrPtr, Tail},
@@ -83,7 +83,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
             #[cfg(not(loom))]
             let tail = NonNull::new(*this.sentinel_node.prev.get_mut());
             #[cfg(loom)]
-            let tail = this.sentinel_node.next.with_mut(|tail| NonNull::new(*tail));
+            let tail = this.sentinel_node.prev.with_mut(|tail| NonNull::new(*tail));
             debug_assert_eq!(this.head(), tail);
             this.set_head(ptr::null_mut());
         }
@@ -145,13 +145,14 @@ node_getters!(
 
 impl<T, S: QueueState, SP: SyncPrimitives> Drop for NodeDrained<'_, '_, T, S, SP> {
     fn drop(&mut self) {
+        let node = unsafe { self.node.as_ref() };
         let next = if self.node == self.drain.sentinel_node.prev().into() {
             ptr::null_mut()
         } else {
             let locked = unsafe { self.drain.locked.as_mut().unwrap_unchecked() };
-            unsafe { locked.get_next(&self.node.as_ref().next).as_ptr() }
+            locked.get_next(&node.next).as_ptr()
         };
         self.drain.set_head(next);
-        unsafe { self.node.as_ref().dequeue() }
+        node.prev.store(RawNodeState::Dequeued.into_ptr(), Release);
     }
 }

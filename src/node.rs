@@ -31,11 +31,6 @@ impl NodeLink {
         unsafe { self.prev.load(Relaxed).as_ref().unwrap_unchecked() }
     }
 
-    pub(crate) fn dequeue(&self) {
-        let dequeued = ptr::without_provenance_mut(RawNodeState::Dequeued as _);
-        self.prev.store(dequeued, Release);
-    }
-
     #[inline(always)]
     pub(crate) fn next(&self) -> Option<NonNull<NodeLink>> {
         NonNull::new(self.next.load(SeqCst))
@@ -66,6 +61,12 @@ pub enum RawNodeState {
     Unqueued = 0,
     Queued = 2,
     Dequeued = 1,
+}
+
+impl RawNodeState {
+    pub(crate) const fn into_ptr(self) -> *mut NodeLink {
+        ptr::without_provenance_mut(self as _)
+    }
 }
 
 pub enum NodeState<'a, Q: QueueRef> {
