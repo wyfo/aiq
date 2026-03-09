@@ -16,7 +16,7 @@ const PERMIT_SHIFT: usize = 1;
 #[derive(Default)]
 struct Waiter {
     waker: Option<Waker>,
-    permits: u32,
+    permits_remaining: u32,
 }
 
 #[derive(Default)]
@@ -72,11 +72,11 @@ impl Semaphore {
             loop {
                 let mut waiter = locked.dequeue().unwrap();
                 let requeue = waiter.with_data_mut(|mut waiter| {
-                    if waiter.permits as usize > permits {
-                        waiter.permits -= permits as u32;
+                    if waiter.permits_remaining as usize > permits {
+                        waiter.permits_remaining -= permits as u32;
                         return true;
                     }
-                    permits -= waiter.permits as usize;
+                    permits -= waiter.permits_remaining as usize;
                     wakers.push(waiter.waker.take().unwrap());
                     false
                 });
@@ -239,7 +239,8 @@ impl<'a> Acquire<'a> {
                     break Poll::Ready(Err(AcquireError(())));
                 }
                 waiter.with_data_mut(|mut waiter| {
-                    waiter.permits = *this.permits - (state.unwrap_or(0) as u32 >> PERMIT_SHIFT);
+                    waiter.permits_remaining =
+                        *this.permits - (state.unwrap_or(0) as u32 >> PERMIT_SHIFT);
                     waiter.waker.get_or_insert_with(|| cx.waker().clone());
                 });
                 match waiter.try_enqueue_with_queue_state(state) {
@@ -271,7 +272,7 @@ impl<'a> Acquire<'a> {
         match this.node.state() {
             NodeState::Unqueued(_) => {}
             NodeState::Queued(mut waiter) => {
-                let acquired = (*this.permits - waiter.with_data_mut(|w| w.permits)) as _;
+                let acquired = (*this.permits - waiter.with_data_mut(|w| w.permits_remaining)) as _;
                 if let Err((sem, locked)) = waiter.dequeue_try_set_queue_state(acquired) {
                     sem.0.add_permits_locked(acquired, locked);
                 }
