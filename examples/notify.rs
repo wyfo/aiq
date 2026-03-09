@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #[cfg(not(loom))]
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::{
