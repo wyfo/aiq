@@ -52,6 +52,10 @@ jobs:
   miri:
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        seeds: [0..256, 256..512, 512..768, 768..1024, 1024..1280, 1280..1536, 1536..1792, 1792..2048]
     steps:
       - uses: actions/checkout@v4
       - name: install miri
@@ -59,4 +63,4 @@ jobs:
       - name: miri
         run: cargo +nightly miri test --test miri_notify --test miri_semaphore
         env:
-          MIRIFLAGS: -Zmiri-many-seeds=0..2048 -Zmiri-compare-exchange-weak-failure-rate=0
+          MIRIFLAGS: -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-compare-exchange-weak-failure-rate=0
