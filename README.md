@@ -58,29 +58,29 @@ Benchmark results for `tokio` benchmarks, run with both tokio native primitives 
 
 | Benchmark | aiq | tokio | aiq speedup |
 |-----------|----:|------:|------------:|
-| `notify_one/10` | 116.42 µs | 109.91 µs | 0.94 |
-| `notify_one/50` | 90.67 µs | 134.49 µs | 1.48 |
-| `notify_one/100` | 87.32 µs | 134.30 µs | 1.54 |
-| `notify_one/200` | 82.55 µs | 123.66 µs | 1.50 |
-| `notify_one/500` | 86.43 µs | 113.21 µs | 1.31 |
+| `notify_one/10` | 160.12 µs | 104.80 µs | 0.65 |
+| `notify_one/50` | 90.61 µs | 132.19 µs | 1.46 |
+| `notify_one/100` | 83.83 µs | 136.12 µs | 1.62 |
+| `notify_one/200` | 84.63 µs | 128.59 µs | 1.52 |
+| `notify_one/500` | 84.88 µs | 121.12 µs | 1.43 |
 | | | | |
-| `notify_waiters/10` | 257.66 µs | 397.64 µs | 1.54 |
-| `notify_waiters/50` | 121.76 µs | 232.06 µs | 1.91 |
-| `notify_waiters/100` | 98.14 µs | 157.64 µs | 1.61 |
-| `notify_waiters/200` | 94.02 µs | 152.86 µs | 1.63 |
-| `notify_waiters/500` | 103.53 µs | 157.85 µs | 1.52 |
+| `notify_waiters/10` | 243.29 µs | 259.03 µs | 1.06 |
+| `notify_waiters/50` | 114.68 µs | 169.27 µs | 1.48 |
+| `notify_waiters/100` | 95.52 µs | 154.03 µs | 1.61 |
+| `notify_waiters/200` | 93.07 µs | 140.76 µs | 1.51 |
+| `notify_waiters/500` | 106.41 µs | 153.51 µs | 1.44 |
 | | | | |
-| `contention/concurrent_multi` | 6.87 µs | 6.91 µs | 1.01 |
-| `contention/concurrent_single` | 136.16 ns | 163.61 ns | 1.20 |
+| `contention/concurrent_multi` | 6.95 µs | 6.94 µs | 1.00 |
+| `contention/concurrent_single` | 129.82 ns | 158.25 ns | 1.22 |
 | | | | |
-| `uncontented/concurrent_multi` | 6.92 µs | 6.97 µs | 1.01 |
-| `uncontented/concurrent_single` | 134.84 ns | 163.25 ns | 1.21 |
-| `uncontented/multi` | 52.72 ns | 92.52 ns | 1.75 |
+| `uncontented/concurrent_multi` | 6.97 µs | 7.00 µs | 1.00 |
+| `uncontented/concurrent_single` | 130.40 ns | 157.94 ns | 1.21 |
+| `uncontented/multi` | 52.47 ns | 92.17 ns | 1.76 |
 | | | | |
 
 `aiq`-based reimplementations seem to give a consistent speedup compared to tokio native ones.
 
-Only `notify_one/10` gives a worse result, but it seems to be a side effect of the benchmark implementation itself. In fact, because `aiq` enqueuing operation is more parallelizable than tokio's mutex-protected one, waiter tasks have been measured to be 2x more often blocked on a pending future, resulting in the tokio worker thread being parked (because there are only 1-2 tasks per thread with only 10 waiter tasks).
+Only `notify_one/10` gives a worse (and quite random) result, but it seems to be a side effect of the benchmark implementation itself. In fact, because `aiq` enqueuing operation is more parallelizable than tokio's mutex-protected one, waiter tasks have been measured to be 2x more often blocked on a pending future, resulting in the tokio worker thread being parked (because there are only 1-2 tasks per thread with only 10 waiter tasks).
 
 ## Acknowledgements
 
