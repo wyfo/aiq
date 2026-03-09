@@ -82,6 +82,10 @@ Benchmark results for `tokio` benchmarks, run with both tokio native primitives 
 
 Only `notify_one/10` gives a worse (and quite random) result, but it seems to be a side effect of the benchmark implementation itself. In fact, because `aiq` enqueuing operation is more parallelizable than tokio's mutex-protected one, waiter tasks have been measured to be 2x more often blocked on a pending future, resulting in the tokio worker thread being parked (because there are only 1-2 tasks per thread with only 10 waiter tasks).
 
+## Testing
+
+Reimplementations of `tokio::sync::Notify` and `tokio::sync::Semaphore` are tested on the full tokio test suite with both [`miri`](https://github.com/rust-lang/miri/) and [`loom`](https://github.com/tokio-rs/loom).
+
 ## Acknowledgements
 
 `aiq::queue::Drain` algorithm reuses the idea originally introduced to tokio by [Tymoteusz Wiśniewski](https://github.com/satakuma) in [tokio-rs/tokio#5458](https://github.com/tokio-rs/tokio/pull/5458): make the draining atomic by moving the list nodes into a temporary circular list.
