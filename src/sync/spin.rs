@@ -24,18 +24,12 @@ unsafe impl Mutex for SpinMutex {
     }
 }
 
-pub struct SpinParker(AtomicBool);
+pub struct SpinParker;
 
-unsafe impl Parker for SpinParker {
-    const INIT: Self = Self(AtomicBool::new(false));
+impl Parker for SpinParker {
+    const INIT: Self = Self;
     #[inline]
-    unsafe fn park(&self) {
-        while !self.0.load(Acquire) {
-            core::hint::spin_loop();
-        }
-    }
+    unsafe fn park(&self) {}
     #[inline]
-    fn unpark(&self) {
-        self.0.store(true, Release);
-    }
+    fn unpark(&self) {}
 }

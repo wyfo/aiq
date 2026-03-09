@@ -11,8 +11,8 @@ impl AtomicParker {
     const PARKED: u32 = u32::MAX;
 }
 
-// SAFETY: implementation taken for std Parker futex implementation
-unsafe impl Parker for AtomicParker {
+// implementation taken for std Parker futex implementation
+impl Parker for AtomicParker {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self(AtomicU32::new(0));
 

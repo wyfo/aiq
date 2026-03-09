@@ -154,8 +154,8 @@ impl PthreadParker {
     const PARKED: usize = usize::MAX;
 }
 
-// SAFETY: implementation inspired for std Parker futex/pthread implementation
-unsafe impl Parker for PthreadParker {
+// implementation inspired for std Parker futex/pthread implementation
+impl Parker for PthreadParker {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self {
         state: AtomicUsize::new(Self::EMPTY),

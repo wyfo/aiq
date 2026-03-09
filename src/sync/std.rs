@@ -9,7 +9,6 @@ use loom::sync::{Condvar, Mutex, MutexGuard, atomic::AtomicUsize, atomic::Orderi
 #[derive(Debug)]
 pub struct StdMutex(Mutex<()>);
 
-#[cfg(feature = "std")]
 unsafe impl super::Mutex for StdMutex {
     #[cfg(not(loom))]
     #[allow(clippy::declare_interior_mutable_const)]
@@ -41,7 +40,6 @@ unsafe impl super::Mutex for StdMutex {
     }
 }
 
-#[cfg(feature = "std")]
 #[derive(Debug)]
 pub struct StdParker {
     state: AtomicUsize,
@@ -49,16 +47,14 @@ pub struct StdParker {
     condvar: Condvar,
 }
 
-#[cfg(feature = "std")]
 impl StdParker {
     const EMPTY: usize = 0;
     const NOTIFIED: usize = 1;
     const PARKED: usize = usize::MAX;
 }
 
-#[cfg(feature = "std")]
-// SAFETY: implementation inspired for std Parker futex/pthread implementation
-unsafe impl super::Parker for StdParker {
+// implementation inspired for std Parker futex/pthread implementation
+impl super::Parker for StdParker {
     #[cfg(not(loom))]
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self {

@@ -6,15 +6,7 @@ pub use super::spin::SpinParker;
 #[cfg(feature = "std")]
 pub use super::std::StdParker;
 
-/// # Safety
-///
-/// [`park`] must block until [`unpark`] is called; there cannot be spurious wakeup.
-/// If [`unpark`] has been called before [`park`], then [`park`] must return immediately.
-/// Calls to [`unpark`] must *synchronize-with* calls to [`park`].
-///
-/// [`park`]: Self::park
-/// [`unpark`]: Self::unpark
-pub unsafe trait Parker {
+pub trait Parker {
     const INIT: Self;
     #[doc(hidden)]
     fn new() -> Self
