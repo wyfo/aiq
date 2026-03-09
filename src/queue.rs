@@ -102,7 +102,7 @@ macro_rules! __private_queue_ref {
     (@state $ty:ty) => { $ty };
 }
 
-const IS_HEAD: *mut NodeLink = ptr::without_provenance_mut(RawNodeState::Queued as _);
+const HEAD_MARKER: *mut NodeLink = ptr::without_provenance_mut(RawNodeState::Queued as _);
 
 pub struct Queue<T, S: QueueState = (), SP: SyncPrimitives = DefaultSyncPrimitives> {
     tail: AtomicPtr<Tail<S>>,
@@ -263,7 +263,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
                 return false;
             }
             let prev = StateOrPtr::from(tail).tail();
-            let prev_ptr = prev.map_or(IS_HEAD, NonNull::as_ptr);
+            let prev_ptr = prev.map_or(HEAD_MARKER, NonNull::as_ptr);
             unsafe { node.as_ref().prev.store(prev_ptr, Relaxed) };
             let new_tail = StateOrPtr::Ptr(node).into();
             match (self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Relaxed) {
@@ -398,7 +398,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
         wait_enqueued: bool,
         prev: *mut NodeLink,
     ) -> bool {
-        let is_head = prev == IS_HEAD;
+        let is_head = prev == HEAD_MARKER;
         let prev_next = if is_head {
             &self.head
         } else {
@@ -458,14 +458,14 @@ impl<T, S: QueueState, SP: SyncPrimitives> Dequeue<'_, '_, T, S, SP> {
     pub fn try_set_queue_state(self, state: S) -> bool {
         let this = &mut *ManuallyDrop::new(self);
         let new_tail = StateOrPtr::State(state).into();
-        unsafe { (this.locked).remove_with_prev(this.node.as_ref(), new_tail, false, IS_HEAD) }
+        unsafe { (this.locked).remove_with_prev(this.node.as_ref(), new_tail, false, HEAD_MARKER) }
     }
 }
 
 impl<T, S: QueueState, SP: SyncPrimitives> Drop for Dequeue<'_, '_, T, S, SP> {
     fn drop(&mut self) {
         let new_tail = ptr::null_mut();
-        unsafe { (self.locked).remove_with_prev(self.node.as_ref(), new_tail, false, IS_HEAD) };
+        unsafe { (self.locked).remove_with_prev(self.node.as_ref(), new_tail, false, HEAD_MARKER) };
     }
 }
 

@@ -64,23 +64,9 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
 
     #[inline]
     pub fn next(self: Pin<&mut Self>) -> Option<NodeDrained<'a, '_, T, S, SP>> {
-        (unsafe { self.get_unchecked_mut() }).next_impl()
-    }
-
-    fn next_impl(&mut self) -> Option<NodeDrained<'a, '_, T, S, SP>> {
-        if self.locked.is_none() {
-            self.lock();
-        }
-        Some(NodeDrained {
-            node: self.head()?,
-            drain: self,
-        })
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn lock(&mut self) {
-        self.locked = Some(self.queue.lock());
+        let this = unsafe { self.get_unchecked_mut() };
+        this.locked.as_ref().unwrap();
+        this.head().map(|node| NodeDrained { node, drain: this })
     }
 
     pub fn execute_unlocked<F: FnOnce() -> R, R>(self: Pin<&mut Self>, f: F) -> R {
@@ -121,12 +107,23 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
             }
         }
     }
+
+    #[cold]
+    #[inline(never)]
+    fn drain(&mut self) {
+        self.locked.get_or_insert_with(|| self.queue.lock());
+        while let Some(node) = self.head() {
+            drop(NodeDrained { node, drain: self });
+        }
+    }
 }
 
 impl<'a, T, S: QueueState, SP: SyncPrimitives> Drop for Drain<'a, T, S, SP> {
+    #[inline]
     fn drop(&mut self) {
-        self.locked.get_or_insert_with(|| self.queue.lock());
-        while self.next_impl().is_some() {}
+        if !self.sentinel_node.next.load(Relaxed).is_null() {
+            self.drain();
+        }
     }
 }
 
