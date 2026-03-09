@@ -1,6 +1,6 @@
 # Algorithm
 
-`aiq` stands for Atomic Intrusive Queue. It is a doubly intrusive linked-list of pinned nodes, which support concurrent tail-insertion and serialized removal.
+`aiq` stands for Atomic Intrusive Queue. It is an intrusive doubly-linked list of pinned nodes, which supports concurrent tail-insertion and serialized removal.
 
 Code fragments included in the explanation are simplified for clarity.
 
@@ -30,7 +30,7 @@ pub struct Queue<T, S: QueueState, SP: SyncPrimitives = DefaultSyncPrimitives> {
     tail: AtomicPtr<Tail<S>>,
     head: AtomicPtr<NodeLink>,
     #[cfg(not(target_arch = "x86_64"))]
-    parked_node: AtomicPtr<AtomicPtr<NodeLink>>,
+    parked_next: AtomicPtr<AtomicPtr<NodeLink>>,
     mutex: SP::Mutex,
     parker: SP::Parker,
     _node_data: PhantomData<T>,
@@ -43,17 +43,17 @@ struct NodeLink {
 }
 ```
 
-where `NodeLink` is the [linking part](https://www.youtube.com/watch?v=eVTXPUF4Oz4) of a bigger `repr(C)` node struct covered in a next [section](#node-data-and-aliasing). `T` parameter of `Queue` represents arbitrary data carried by the node; it has no importance for the algorithm itself, but matters when queue is used.
+where `NodeLink` is the [linking part](https://www.youtube.com/watch?v=eVTXPUF4Oz4) of a bigger `repr(C)` node struct covered in a later [section](#node-data-and-aliasing). `T` parameter of `Queue` represents arbitrary data carried by the node; it has no importance for the algorithm itself, but matters when the queue is used.
 
 `Tail<S>` is just a marker type to indicate the tail pointer may contain a [queue state](#queue-state) when there is no node. `*mut Tail<S>` can be considered as a `union { state: S, ptr: NonNull<NodeLink> }`.
 
-`NodeLink::prev` is also used to carry the node state using special values:
-- 0: the node is unqueued
-- 1: the node is dequeued
+`NodeLink::prev` also encodes the node's state via special values when it is not actively pointing to a predecessor:
+- 0: the node is unqueued (never inserted)
+- 1: the node is dequeued (was inserted and has since been removed)
 - 2: the node is queued and is the queue's head
 - address of a previous node: the node is queued
 
-Because nodes' pointers are stored in the queue, the pointers must remain valid as long as the node are queued. This is achieved by requiring the node to be pinned to be inserted. It also means that nodes must be removed from the queue before being dropped. This is done in node's [destructor](#node-data-and-aliasing).
+Because the queue stores raw pointers to nodes, those pointers must remain valid as long as the nodes are queued. This is achieved by requiring nodes to be pinned before insertion. It also means that nodes must be removed from the queue before being dropped, which is done in the node's [destructor](#node-data-and-aliasing).
 
 Synchronization of node insertion and removal using parker is done differently depending on the platform, as detailed in the dedicated [section](#parking-algorithm).
 
@@ -78,7 +78,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
             // Contrary to mutex-protected queues which rely on the total modification order 
             // of the mutex's atomic state, this queue relies on the `SeqCst` total order, 
             // as a `SeqCst` load is a lot less expensive than an atomic RMW operation.
-            match self.tail.compare_exchange_weak(tail, new_tail, SeqCst, Relaxed) {
+            match self.tail.compare_exchange_weak(tail, node, SeqCst, Relaxed) {
                 Ok(_) => break,
                 Err(t) => tail = t,
             }
@@ -88,7 +88,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
         #[cfg(not(target_arch = "x86_64"))]
         prev_next.store(node, SeqCst);
         #[cfg(not(target_arch = "x86_64"))]
-        if self.parked_node.load(SeqCst) == prev_next.as_ptr() {
+        if self.parked_next.load(SeqCst) == prev_next.as_ptr() {
             self.parker.unpark();
         }
         #[cfg(target_arch = "x86_64")]
@@ -101,11 +101,11 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
 
 ## Locked queue
 
-Once a node is enqueued, i.e. the tail pointer has been updated, every access to it (including removal) must be serialized through the queue mutex. This is done safely through a `LockedQueue` guard returned by `Queue::lock`.
+Once a node is enqueued (i.e. the tail pointer has been updated), every subsequent operation on that node (including removal) must be serialized through the queue mutex. This is done safely through a `LockedQueue` guard returned by `Queue::lock`.
 
 ## Parking algorithm
 
-Node insertion is not atomic, queue's tail is first updated, then the next pointer of the previous node/tail is set. It means that the previous node must remain valid (not be dropped) until the insertion ends. As a consequence, when a node is removed, if it is not the tail, it must wait for its next pointer to be set. It is enforced using queue's parker with a platform-dependent algorithm:
+Node insertion is two-phased: the queue's tail pointer is first updated atomically (phase 1), then the predecessor node's `next` (or the queue's head) pointer is written (phase 2). This means the predecessor node must remain valid until phase 2 completes. As a consequence, removing a non-tail node requires waiting for phase 2 to finish, i.e. waiting for the node's `next` pointer to be written. This is enforced using the queue's parker with a platform-dependent algorithm:
 
 ```rust
 impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
@@ -120,7 +120,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
             hint::spin_loop();
         }
         #[cfg(not(target_arch = "x86_64"))]
-        (self.parked_node).store(ptr::from_ref(next).cast_mut(), SeqCst);
+        self.parked_next.store(ptr::from_ref(next).cast_mut(), SeqCst);
         #[cfg(target_arch = "x86_64")]
         const PARKED: *mut NodeLink = ptr::without_provenance_mut(1);
         #[cfg(target_arch = "x86_64")]
@@ -130,7 +130,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
         loop {
             #[cfg(not(target_arch = "x86_64"))]
             if let Some(next) = NonNull::new(next.load(SeqCst)) {
-                self.parked_node.store(ptr::null_mut(), SeqCst);
+                self.parked_next.store(ptr::null_mut(), SeqCst);
                 return next;
             }
             unsafe { self.parker.park() };
@@ -145,19 +145,19 @@ impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
 }
 ```
 
-Notice `get_next` is a method of `LockedQueue`, which means queue's lock must be acquired, so there is no data race in queue's parker use.
+Notice `get_next` is a method of `LockedQueue`, meaning the queue's lock must be held. This guarantees that only one thread at a time can be waiting in `park`, so there is no data race on the queue's parker.
 
 ### x86_64
 
-On removal side, next pointer updated with a CAS to a special value meaning the thread is parked, while insertion side write next pointer with CAS too. If removal CAS succeeds, the thread is parked. On the other side, if insertion CAS fails, it means the removal thread has been parked and must be unparked.
+On the removal side, the next pointer is replaced with a `PARKED` sentinel via a CAS. If the CAS succeeds, the removal thread parks. On the insertion side, the next pointer is overwritten via an atomic swap. If the swap returns the `PARKED` sentinel — meaning the removal thread had set it — the insertion thread calls `unpark`.
 
 ### Other platforms
 
-On other platforms, `SeqCst` stores are less expensive than a CAS[^1]. The algorithm is optimized for it and becomes:
-- insertion: seqcst store of previous node's next pointer + seqcst load of queue's `parked_next` → unpark if `parked_next` is previous node's next pointer
-- removal: seqcst store of queue's `parked_next` + seqcst load of node's next pointer → park if next pointer is not set
+On other platforms, `SeqCst` stores are less expensive than a CAS[^1]. The algorithm is optimized for this and becomes:
+- insertion: `SeqCst` store to the predecessor's `next` pointer, then `SeqCst` load of `parked_next` → unpark if `parked_next` equals the predecessor's `next` pointer
+- removal: `SeqCst` store to `parked_next`, then `SeqCst` load of the node's `next` pointer → park if not yet set
 
-This is a variation of the classical "store X; load Y || store Y; load X". It leverages [parker's token system](https://doc.rust-lang.org/std/thread/fn.park.html#park-and-unpark), so the order of park vs. unpark doesn't matter. 
+This is a variation of the classical "store X; load Y || store Y; load X" pattern, which guarantees that at least one side sees the other's write. It relies on the `Parker` implementation delivering an `unpark` that was issued before `park` as an immediate return, so the order of park vs. unpark does not matter.
 
 ## Node removal
 
@@ -179,17 +179,18 @@ impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
         }
         let mut next = node.next();
         // If next pointer is not set, node is assumed to be the tail;
-        // reset the next pointer of the previous node/queue's head and set 
-        // the tail to the previous node/null.
-        // Next pointer must be set before the tail is updated, so there will be no
-        // race with the next inserted node.
+        // reset prev_next (the predecessor's next pointer, or queue's head) and
+        // update the tail to point to the predecessor (or null).
+        // prev_next must be cleared before the tail CAS: otherwise a concurrent
+        // enqueuer whose phase 1 CAS succeeds between the tail CAS and the clear
+        // could have its phase 2 write overwritten.
         if next.is_none() {
             prev_next.store(ptr::null_mut(), Relaxed);
             let new_tail = if is_head { ptr::null_mut() } else { prev };
             if ((self.tail).compare_exchange(node, new_tail, SeqCst, Relaxed)).is_err() {
-                // If tail update fails, it means that another node has been enqueued since
-                // (as the lock is acquired, so no other operation can be done on the queue).
-                // Removal must then wait for the enqueuing to be completed.
+                // The tail CAS failed, meaning a concurrent insertion (phase 1) appended
+                // a new node after this one since we read next. Wait for that insertion's
+                // phase 2 to write the next pointer.
                 next = Some(self.get_next(&node.next));
             }
         }
@@ -199,38 +200,13 @@ impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
             prev_next.store(next.as_ptr(), Relaxed);
         }
         // Set the prev pointer to the special dequeued state value.
-        // Use `Release` ordering so synchronize with future access of the state.
+        // Use `Release` ordering so synchronize with future accesses of the state.
         node.prev.store(RawNodeState::Dequeued.into_ptr(), Release);
-        let unlink = |next: NonNull<NodeLink>| {
-            next.as_ref().prev.store(prev, Relaxed);
-            prev_next_ptr.store(next.as_ptr(), Relaxed);
-            // Set the prev pointer to the special dequeued state value.
-            // Use `Release` ordering so synchronize with future access of the state.
-            (*node).prev.store(ptr::without_provenance_mut(1), Release);
-        };
-        // If node's next is set, then it can safely be unlinked.
-        if let Some(next) = NonNull::new((*node).next.load(SeqCst)) {
-            return unlink(next);
-        }
-        // Otherwise, assuming the node is the tail, reset the next pointer of
-        // the previous node/queue's head and set the tail to the previous node/null.
-        // Next pointer must be set before the tail is updated, so there will be no
-        // race with the next inserted node.
-        prev_next_ptr.store(ptr::null_mut(), Relaxed);
-        let new_tail = prev.map_addr(|addr| addr & !2);
-        match self.tail.compare_exchange(node, new_tail, SeqCst, Relaxed) {
-            // The tail has been successfully updated, previous node's next/queue's head
-            // has already been reset, so just update the node state to dequeued
-            Ok(_) => (*node).prev.store(ptr::without_provenance_mut(1), Release),
-            // Another node has been enqueued since, so wait for the next pointer to be set
-            // and unlink the node.
-            Err(_) => unlink(self.get_next(&(*node).next)),
-        }
     }
 }
 ```
 
-There are three ways to remove a node from the queue
+There are three ways to remove a node from the queue:
 
 #### Node removing itself
 
@@ -250,7 +226,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
 }
 ```
 
-Node is removed in `Dequeue` destructor — not running just make the next `dequeue` call to return the same node.
+The node is removed in the `Dequeue` destructor. Forgetting the `Dequeue` value (e.g. via `Dequeue::requeue()`) skips removal, causing the next `dequeue` call to return the same node.
 
 #### Popping a node (LIFO)
 
@@ -264,7 +240,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
 }
 ```
 
-Node is removed in `Pop` destructor, but with `wait_enqueued=true`.
+The node is removed in the `Pop` destructor with `wait_enqueued=true`, because the tail node may still be mid-phase-2 of its own insertion when `pop` is called.
 
 ## Queue draining
 
@@ -288,7 +264,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
             head = locked.get_next(&locked.queue.head).as_ptr();
             // Reset the head
             locked.head.store(ptr::null_mut(), Relaxed);
-            // Swap the head
+            // Swap the tail to reset it and keep the current enqueued nodes
             let tail = locked.tail.swap(ptr::null_mut(), SeqCst);
         }
         Self {
@@ -301,7 +277,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
         }
     }
     
-    /// Every operation on `Drain` requires to have it pinned.
+    /// Every operation on `Drain` requires it to be pinned.
     pub fn next(self: Pin<&mut Self>) -> Option<NodeDrained<'a, '_, T, S, SP>> {
         let this = unsafe { self.get_unchecked_mut() };
         this.locked.as_ref().unwrap();
@@ -310,11 +286,11 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
 }
 ```
 
-Circular chaining is not done at `Drain` creation. Indeed, it would require the sentinel node to be pinned, but it cannot be the case in a function that returns it. The additional trick is to do the chaining only if the lock must be temporarily released. There is a `fn execute_unlocked<F: FnOnce() -> R, R>(self: Pin<&mut Self>, f: F) -> R` that does exactly that. When the lock is released, nodes can be removed, and because the list is circular, they will never interfere with queue's head of tail. 
+Circular chaining is not done at `Drain` creation, because the sentinel node cannot be pinned before being returned from the constructor. Instead, it is deferred to `fn execute_unlocked<F: FnOnce() -> R, R>(self: Pin<&mut Self>, f: F) -> R`, which is called when the lock must be temporarily released. When the lock is released, nodes may remove themselves; because the remaining chain is circular through the sentinel, such self-removals never interfere with the queue's head or tail.
 
 ## Node data and aliasing
 
-Concurrent intrusive queues are breaking[^2] the Rust aliasing model, as a thread can have a mutable reference on its node while another may dequeue the node and access its data.
+Concurrent intrusive queues break[^2] the Rust aliasing model, as a thread can hold a mutable reference to its node while another thread dequeues the node and accesses its data.
 
 [RFC 3467](https://rust-lang.github.io/rfcs/3467-unsafe-pinned.html) introduces a new `UnsafePinned` wrapper for this purpose, with a polyfill on stable toolchain. The full node definition is then:
 
@@ -331,14 +307,14 @@ struct NodeInner<T> {
 }
 ```
 
-`repr(C)` allows casting `NodeLink` pointer manipulated in the algorithm to `NodeInner` pointer and access node's data. 
-Node's data is not considered thread-safe, so its accesses must be serialized; this is done through queue's mutex while the node is in queued state.
+`repr(C)` allows casting the `NodeLink` pointer used in the algorithm to a `NodeInner` pointer to access the node's data.
+The node's data is not considered thread-safe, so accesses to it must be serialized; this is done through the queue's mutex while the node is in the queued state.
 
-`Node` struct also embed a queue reference to enforce the removal of the node from the queue before dropping it. Because the node must be pinned to be enqueued, its removal is [guaranteed](https://doc.rust-lang.org/std/pin/index.html#drop-guarantee), so the queue cannot contain dangling nodes.
+The `Node` struct also embeds a queue reference to enforce node removal before the `Node` is dropped. Because the node must be pinned to be enqueued, Rust's [drop guarantee](https://doc.rust-lang.org/std/pin/index.html#drop-guarantee) ensures the destructor runs before the memory is freed, so the queue cannot contain dangling nodes.
 
 ## Node state and access
 
-A node has three states stored in its `prev` pointer: unqueued, queued and dequeued. This is materialized in the following API:
+A node has three states stored in its `prev` pointer: unqueued, queued, and dequeued. This is exposed through the following API:
 
 ```rust
 impl<Q: QueueRef> Node<Q> {
@@ -351,25 +327,25 @@ pub enum NodeState<'a, Q: QueueRef> {
     Dequeued(NodeDequeued<'a, Q>),
 }
 ``` 
-Each state wrapper has proper methods: `enqueue` for `NodeUnqueued`, `dequeue` for `NodeQueued`, etc. All of them has data accessor, but as accessing the data of a queued node required to have the queue's mutex acquired, a mutex guard is embedded in `NodeQueued`.
+Each state wrapper has appropriate methods: `enqueue` for `NodeUnqueued`, `dequeue` for `NodeQueued`, etc. All of them have a data accessor, but since accessing the data of a queued node requires the queue's mutex to be held, a mutex guard is embedded in `NodeQueued`.
 
-Regarding `Dequeue`/`Pop`/`NodeDrained` types seen earlier, because they all borrow queue's mutex guard, they also give safely access to node data.
+Regarding the `Dequeue`/`Pop`/`NodeDrained` types seen earlier, because they all borrow the queue's mutex guard, they also safely provide access to node data.
 
 ## Queue state
 
-A big advantage to `aiq` regarding mutex-protected queue is that the atomic tail can be used to store arbitrary integer data when the queue is empty (thanks to pointer tagging technique). The `S: QueueState` parameter can accept two values: `()`, i.e. no state, and `usize`. With the latter a whole class of algorithms becomes possible, the most immediate being a semaphore.
+A key advantage of `aiq` over mutex-protected queues is that the atomic tail pointer can store arbitrary integer data when the queue is empty, using pointer tagging. The `S: QueueState` parameter can take two values: `()` (no state) and `usize`. With the latter, a whole class of algorithms becomes possible, the most immediate being a semaphore.
 
-In fact, semaphore counter goes to zero when waiters starts to enqueue, so queue state can be used to store the available permits or the waiter nodes. When there are no enqueued waiters, semaphore operation are reduced to simple CAS loops on queue's tail pointer with `Queue::fetch_update_state<F: FnMut(S) -> Option<S>>(&self, mut f: F) -> Result<S, Option<S>>`. Removal methods also has a twin method to set a new state when removing the last node.
+In a semaphore, the counter reaches zero when waiters start to enqueue, so the queue state can store the number of available permits while the queue stores the waiting nodes. When there are no enqueued waiters, semaphore operations reduce to simple CAS loops on the queue's tail pointer via `Queue::fetch_update_state<F: FnMut(S) -> Option<S>>(&self, mut f: F) -> Result<S, Option<S>>`. Removal methods also have a counterpart that sets a new queue state when removing the last node.
 
 ## `loom` support
 
 [`loom`](http://crates.io/crates/loom) support is enabled through `#[cfg(loom)]`.
 
-`loom`'s biggest limitation is the non-support of `SeqCst` ordering. However, `SeqCst` is used both for the tail pointer manipulation and for the parking algorithm. Supporting `loom` thus requires some adaptations:
- - the parking algorithm is always x86_64's one
- - `SeqCst` loads of the tail pointer are replaced with a CAS in order to rely on the modification total order instead of the `SeqCst` total order.
+`loom`'s biggest limitation is its lack of support for `SeqCst` ordering. However, `SeqCst` is used both for tail pointer manipulation and for the parking algorithm. Supporting `loom` therefore requires some adaptations:
+ - the x86_64 parking algorithm is always used (it relies on modification order rather than `SeqCst` cross-object ordering)
+ - `SeqCst` loads of the tail pointer are replaced with a CAS, so correctness relies on the modification order of the tail atomic rather than the `SeqCst` total order.
 
-Moreover, `loom` doesn't support `UnsafePinned` and pointer based workflows, it requires using `loom::sync::UnsafeCell` to check accesses correctness. So `NodeInner` becomes:
+Moreover, `loom` doesn't support `UnsafePinned` or pointer-based workflows, requiring the use of `loom::sync::UnsafeCell` to check access correctness. So `NodeInner` becomes:
 ```rust
 #[repr(C)]
 pub(crate) struct NodeInner<T> {
@@ -380,7 +356,7 @@ pub(crate) struct NodeInner<T> {
     pub(crate) data: loom::cell::UnsafeCell<T>,
 }
 ```
-As a result, node's data accesses by reference are disabled and methods `with_data`/`with_data_mut` must be used. These methods are also available without `#[cfg(loom)]` (but hidden), making possible to write loom compatible code directly. This is for example used in `aiq` examples.
+As a result, node data accesses by reference are disabled and methods `with_data`/`with_data_mut` must be used. These methods are also available without `#[cfg(loom)]` (but hidden), making it possible to write loom-compatible code directly. This is for example used in `aiq` examples.
 
 [^1]: On x86_64, `SeqCst` atomic stores are compiled into `xchg`, the same assembly instruction as atomic swap.
 [^2]: there is literally a temporary hack in the compiler to handle it.
