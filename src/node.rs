@@ -80,8 +80,8 @@ pub struct Node<Q: QueueRef> {
     node: UnsafePinned<NodeInner<Q::NodeData>>,
 }
 
-unsafe impl<Q: QueueRef> Send for Node<Q> {}
-unsafe impl<Q: QueueRef> Sync for Node<Q> {}
+unsafe impl<Q: QueueRef<NodeData: Send> + Send> Send for Node<Q> {}
+unsafe impl<Q: QueueRef + Sync> Sync for Node<Q> {}
 
 impl<Q: QueueRef> Node<Q> {
     pub fn new(queue: Q) -> Self
@@ -166,6 +166,9 @@ pub struct NodeUnqueued<'a, Q: QueueRef> {
     queue: &'a Q,
 }
 
+unsafe impl<Q: QueueRef<NodeData: Send> + Sync> Send for NodeUnqueued<'_, Q> {}
+unsafe impl<Q: QueueRef<NodeData: Sync> + Sync> Sync for NodeUnqueued<'_, Q> {}
+
 node_getters!(NodeUnqueued<'a, Q: QueueRef>, Q::NodeData);
 
 impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
@@ -202,6 +205,15 @@ pub struct NodeQueued<'a, Q: QueueRef> {
     locked: LockedQueue<'a, Q>,
 }
 
+unsafe impl<'a, Q: QueueRef<NodeData: Send> + Sync> Send for NodeQueued<'a, Q> where
+    LockedQueue<'a, Q>: Send
+{
+}
+unsafe impl<'a, Q: QueueRef<NodeData: Sync> + Sync> Sync for NodeQueued<'a, Q> where
+    LockedQueue<'a, Q>: Sync
+{
+}
+
 node_getters!(NodeQueued<'a, Q: QueueRef>, Q::NodeData);
 
 impl<'a, Q: QueueRef> NodeQueued<'a, Q> {
@@ -233,6 +245,9 @@ pub struct NodeDequeued<'a, Q: QueueRef> {
     node: NonNull<NodeInner<Q::NodeData>>,
     queue: &'a Q,
 }
+
+unsafe impl<Q: QueueRef<NodeData: Send> + Sync> Send for NodeDequeued<'_, Q> {}
+unsafe impl<Q: QueueRef<NodeData: Sync> + Sync> Sync for NodeDequeued<'_, Q> {}
 
 node_getters!(NodeDequeued<'a, Q: QueueRef>, Q::NodeData);
 

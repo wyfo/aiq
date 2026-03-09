@@ -138,6 +138,19 @@ pub struct NodeDrained<
     drain: &'a mut Drain<'drain, T, S, SP>,
 }
 
+unsafe impl<'drain, T: Send, S: QueueState, SP: SyncPrimitives> Send
+    for NodeDrained<'drain, '_, T, S, SP>
+where
+    LockedQueue<'drain, T, S, SP>: Sync,
+{
+}
+unsafe impl<'drain, T: Sync, S: QueueState, SP: SyncPrimitives> Sync
+    for NodeDrained<'drain, '_, T, S, SP>
+where
+    LockedQueue<'drain, T, S, SP>: Sync,
+{
+}
+
 node_getters!(
     NodeDrained<'drain, 'a, T, S: QueueState, SP: SyncPrimitives>,
     T

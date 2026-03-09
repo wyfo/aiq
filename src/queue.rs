@@ -114,8 +114,18 @@ pub struct Queue<T, S: QueueState = (), SP: SyncPrimitives = DefaultSyncPrimitiv
     _node_data: PhantomData<T>,
 }
 
-unsafe impl<T, S: QueueState, SP: SyncPrimitives> Send for Queue<T, S, SP> {}
-unsafe impl<T, S: QueueState, SP: SyncPrimitives> Sync for Queue<T, S, SP> {}
+unsafe impl<T: Send, S: QueueState + Send, SP: SyncPrimitives> Send for Queue<T, S, SP>
+where
+    SP::Mutex: Send,
+    SP::Parker: Send,
+{
+}
+unsafe impl<T: Send, S: QueueState + Send, SP: SyncPrimitives> Sync for Queue<T, S, SP>
+where
+    SP::Mutex: Sync,
+    SP::Parker: Sync,
+{
+}
 
 impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
@@ -448,6 +458,19 @@ pub struct Dequeue<'locked, 'a, T, S: QueueState = (), SP: SyncPrimitives = Defa
     locked: &'a mut LockedQueue<'locked, T, S, SP>,
 }
 
+unsafe impl<'locked, T: Send, S: QueueState, SP: SyncPrimitives> Send
+    for Dequeue<'locked, '_, T, S, SP>
+where
+    LockedQueue<'locked, T, S, SP>: Send,
+{
+}
+unsafe impl<'locked, T: Sync, S: QueueState, SP: SyncPrimitives> Sync
+    for Dequeue<'locked, '_, T, S, SP>
+where
+    LockedQueue<'locked, T, S, SP>: Sync,
+{
+}
+
 node_getters!(Dequeue<'drain, 'a, T, S: QueueState, SP: SyncPrimitives>, T);
 
 impl<T, S: QueueState, SP: SyncPrimitives> Dequeue<'_, '_, T, S, SP> {
@@ -472,6 +495,15 @@ impl<T, S: QueueState, SP: SyncPrimitives> Drop for Dequeue<'_, '_, T, S, SP> {
 pub struct Pop<'locked, 'a, T, S: QueueState = (), SP: SyncPrimitives = DefaultSyncPrimitives> {
     node: NonNull<NodeLink>,
     locked: &'a mut LockedQueue<'locked, T, S, SP>,
+}
+
+unsafe impl<'locked, T: Send, S: QueueState, SP: SyncPrimitives> Send for Pop<'locked, '_, T, S, SP> where
+    LockedQueue<'locked, T, S, SP>: Send
+{
+}
+unsafe impl<'locked, T: Sync, S: QueueState, SP: SyncPrimitives> Sync for Pop<'locked, '_, T, S, SP> where
+    LockedQueue<'locked, T, S, SP>: Sync
+{
 }
 
 node_getters!(Pop<'drain, 'a, T, S: QueueState, SP: SyncPrimitives>, T);
