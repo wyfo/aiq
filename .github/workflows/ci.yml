@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: loom
-        run: cargo test --test loom_notify --test loom_semaphore
+        run: cargo test --test loom_notify --test loom_semaphore --release
         env:
           RUSTFLAGS: --cfg loom
           LOOM_MAX_PREEMPTIONS: 2
