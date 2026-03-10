@@ -1,4 +1,7 @@
-use core::sync::atomic::{AtomicBool, Ordering::*};
+use core::{
+    hint,
+    sync::atomic::{AtomicBool, Ordering::*},
+};
 
 use crate::sync::{mutex::Mutex, parker::Parker};
 
@@ -29,7 +32,9 @@ pub struct SpinParker;
 impl Parker for SpinParker {
     const INIT: Self = Self;
     #[inline]
-    unsafe fn park(&self) {}
+    unsafe fn park(&self) {
+        hint::spin_loop();
+    }
     #[inline]
     fn unpark(&self) {}
 }
