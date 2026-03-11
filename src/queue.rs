@@ -275,15 +275,19 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
             }
         };
         let prev_next = NonNull::from(prev.map_or(&self.head, |p| unsafe { &p.as_ref().next }));
-        #[cfg(not(any(target_arch = "x86_64", loom)))]
-        unsafe { prev_next.as_ref() }.store(node.as_ptr(), SeqCst);
-        #[cfg(not(any(target_arch = "x86_64", loom)))]
-        if self.parked_next.load(SeqCst) == prev_next.as_ptr() {
-            self.unpark();
-        }
-        #[cfg(any(target_arch = "x86_64", loom))]
-        if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), Release)).is_null() } {
-            self.unpark();
+        if SP::Parker::NEVER_BLOCKS {
+            unsafe { prev_next.as_ref() }.store(node.as_ptr(), Release);
+        } else {
+            #[cfg(not(any(target_arch = "x86_64", loom)))]
+            unsafe { prev_next.as_ref() }.store(node.as_ptr(), SeqCst);
+            #[cfg(not(any(target_arch = "x86_64", loom)))]
+            if self.parked_next.load(SeqCst) == prev_next.as_ptr() {
+                self.unpark();
+            }
+            #[cfg(any(target_arch = "x86_64", loom))]
+            if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), Release)).is_null() } {
+                self.unpark();
+            }
         }
         true
     }
@@ -332,6 +336,14 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
     #[cold]
     #[inline(never)]
     fn wait_for_next(&self, next: &AtomicPtr<NodeLink>) -> NonNull<NodeLink> {
+        if SP::Parker::NEVER_BLOCKS {
+            loop {
+                unsafe { self.parker.park() };
+                if let Some(next) = NonNull::new(next.load(Acquire)) {
+                    return next;
+                }
+            }
+        }
         for _ in 0..SP::SPIN_BEFORE_PARK {
             hint::spin_loop();
             if let Some(next) = NonNull::new(next.load(Acquire)) {

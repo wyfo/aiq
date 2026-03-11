@@ -7,6 +7,7 @@ pub use super::spin::SpinParker;
 pub use super::std::StdParker;
 
 pub trait Parker {
+    const NEVER_BLOCKS: bool = false;
     const INIT: Self;
     #[doc(hidden)]
     fn new() -> Self

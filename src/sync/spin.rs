@@ -17,7 +17,7 @@ unsafe impl Mutex for SpinMutex {
     fn lock(&self) -> Self::Guard<'_> {
         while self.0.swap(true, Acquire) {
             while !self.0.load(Relaxed) {
-                core::hint::spin_loop();
+                hint::spin_loop();
             }
         }
     }
@@ -30,6 +30,7 @@ unsafe impl Mutex for SpinMutex {
 pub struct SpinParker;
 
 impl Parker for SpinParker {
+    const NEVER_BLOCKS: bool = true;
     const INIT: Self = Self;
     #[inline]
     unsafe fn park(&self) {
