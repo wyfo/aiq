@@ -10,21 +10,16 @@ use core::{
     ptr,
     ptr::NonNull,
 };
-#[cfg(not(loom))]
-use core::{
-    pin::Pin,
-    sync::atomic,
-    sync::atomic::{AtomicPtr, Ordering::*},
-};
-
-#[cfg(loom)]
-use loom::sync::{
-    atomic,
-    atomic::{AtomicPtr, Ordering::*},
-};
 
 use crate::{
-    node::NodeLink,
+    loom::{
+        AtomicPtrExt,
+        sync::{
+            atomic,
+            atomic::{AtomicPtr, Ordering::*},
+        },
+    },
+    node::{NodeLink, RawNodeState, node_getters},
     sync::{DefaultSyncPrimitives, SyncPrimitives, mutex::Mutex, parker::Parker},
 };
 
@@ -33,8 +28,6 @@ pub(crate) mod state;
 
 pub use drain::*;
 pub use state::*;
-
-use crate::node::{RawNodeState, node_getters};
 
 type MutexGuard<'a, SP> = <<SP as SyncPrimitives>::Mutex as Mutex>::Guard<'a>;
 
@@ -262,19 +255,19 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
 
     pub(crate) unsafe fn enqueue(
         &self,
-        node: NonNull<NodeLink>,
+        mut node: NonNull<NodeLink>,
         mut check_tail: impl FnMut(*mut Tail<S>) -> bool,
     ) -> bool {
         let mut tail = self.tail.load(Relaxed);
         let prev = loop {
             if !check_tail(tail) {
                 atomic::fence(Acquire);
-                unsafe { node.as_ref().prev.store(ptr::null_mut(), Relaxed) }
+                unsafe { node.as_mut().prev.store_mut(ptr::null_mut()) };
                 return false;
             }
             let prev = StateOrPtr::from(tail).tail();
             let prev_ptr = prev.map_or(HEAD_MARKER, NonNull::as_ptr);
-            unsafe { node.as_ref().prev.store(prev_ptr, Relaxed) };
+            unsafe { node.as_mut().prev.store_mut(prev_ptr) };
             let new_tail = StateOrPtr::Ptr(node).into();
             match (self.tail).compare_exchange_weak(tail, new_tail, SeqCst, Relaxed) {
                 Ok(_) => break prev,

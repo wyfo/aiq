@@ -1,5 +1,3 @@
-#[cfg(not(loom))]
-use core::sync::atomic::{AtomicPtr, Ordering::*};
 use core::{
     hint::unreachable_unchecked,
     pin::{Pin, pin},
@@ -7,11 +5,12 @@ use core::{
     ptr::NonNull,
 };
 
-#[cfg(loom)]
-use loom::sync::atomic::{AtomicPtr, Ordering::*};
-
 use crate::{
     Queue,
+    loom::{
+        AtomicPtrExt,
+        sync::atomic::{AtomicPtr, Ordering::*},
+    },
     node::{RawNodeState, node_getters},
     queue::{
         LockedQueue, NodeLink, QueueState,
@@ -49,17 +48,11 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
     }
 
     fn head(&mut self) -> Option<NonNull<NodeLink>> {
-        #[cfg(not(loom))]
-        return NonNull::new(*self.sentinel_node.next.get_mut());
-        #[cfg(loom)]
-        return self.sentinel_node.next.with_mut(|head| NonNull::new(*head));
+        NonNull::new(self.sentinel_node.next.load_mut())
     }
 
     fn set_head(&mut self, head: *mut NodeLink) {
-        #[cfg(not(loom))]
-        let () = *self.sentinel_node.next.get_mut() = head;
-        #[cfg(loom)]
-        self.sentinel_node.next.with_mut(|ptr| *ptr = head);
+        self.sentinel_node.next.store_mut(head);
     }
 
     #[inline]

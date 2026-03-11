@@ -1,15 +1,13 @@
 #[cfg(nightly)]
 use core::pin::UnsafePinned;
-#[cfg(not(loom))]
-use core::sync::atomic::{AtomicPtr, Ordering::*};
 use core::{hint::unreachable_unchecked, pin::Pin, ptr, ptr::NonNull};
 
-#[cfg(loom)]
-use loom::sync::atomic::{AtomicPtr, Ordering::*};
-
-use crate::queue::{QueueRef, StateOrPtr};
 #[cfg(not(nightly))]
 use crate::unsafe_pinned::UnsafePinned;
+use crate::{
+    loom::sync::atomic::{AtomicPtr, Ordering::*},
+    queue::{QueueRef, StateOrPtr},
+};
 
 #[repr(align(4))]
 pub(crate) struct NodeLink {
@@ -279,7 +277,7 @@ macro_rules! node_getters {
             #[cfg(not(loom))]
             #[inline]
             pub fn data_mut(&mut self) -> core::pin::Pin<&mut $data> {
-                unsafe { Pin::new_unchecked(&mut *self.data_ptr()) }
+                unsafe { core::pin::Pin::new_unchecked(&mut *self.data_ptr()) }
             }
 
             #[inline]

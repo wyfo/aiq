@@ -1,10 +1,7 @@
-extern crate std;
-
-#[cfg(not(loom))]
-use std::sync::{Condvar, Mutex, MutexGuard, atomic::AtomicUsize, atomic::Ordering::*};
-
-#[cfg(loom)]
-use loom::sync::{Condvar, Mutex, MutexGuard, atomic::AtomicUsize, atomic::Ordering::*};
+use crate::loom::sync::{
+    Condvar, Mutex, MutexGuard,
+    atomic::{AtomicUsize, Ordering::*},
+};
 
 #[derive(Debug)]
 pub struct StdMutex(Mutex<()>);

@@ -2,6 +2,7 @@
 #![no_std]
 #![cfg_attr(nightly, feature(unsafe_pinned))]
 
+mod loom;
 pub mod node;
 pub mod queue;
 pub mod sync;
