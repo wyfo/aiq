@@ -129,13 +129,7 @@ fn concurrent_cancel() {
         .await
     }
 
-    static I: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     loom::model(|| {
-        if I.fetch_add(1, SeqCst) % 1000 == 0 {
-            print!(".");
-            use std::io::Write;
-            std::io::stdout().flush().unwrap();
-        }
         let semaphore = Arc::new(Semaphore::new(0));
         let t1 = {
             let semaphore = semaphore.clone();
