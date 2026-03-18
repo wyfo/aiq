@@ -64,7 +64,7 @@ unsafe impl<T, S: QueueState, SP: SyncPrimitives> QueueRef for alloc::sync::Arc<
 #[macro_export]
 macro_rules! queue_ref {
     (
-        $ty:ident$(<$($lf:lifetime)? $(,)? $($arg:ident $(: $bound:path)?)? $(,)?>)?,
+        $ty:ident$(<$($lf:lifetime)? $(,)? $($arg:ident $(: $bound:path)?),* $(,)?>)?,
         NodeData = $data:ty,
         $(State = $state:ty,)?
         $(SyncPrimitives = $sync:ty,)?
@@ -72,8 +72,8 @@ macro_rules! queue_ref {
     ) => {
         unsafe impl $(<
             $($lf,)?
-            $($arg $(: $bound)?)?
-        >)? $crate::queue::QueueRef for $ty $(<$($lf,)? $($arg,)?>)? {
+            $($arg $(: $bound)?,)*
+        >)? $crate::queue::QueueRef for $ty $(<$($lf,)? $($arg,)*>)? {
             type NodeData = $data;
             type State = $crate::__private_queue_ref!(@state $($state)?);
             type SyncPrimitives = $crate::__private_queue_ref!(@sync $($sync)?);
@@ -209,6 +209,19 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
     }
 
     #[inline]
+    pub fn with_lock<'a, L: FnOnce(LockedQueue<'a, T, S, SP>)>(&'a self, locked_fallback: L) {
+        if !self.is_empty() {
+            self.locked(locked_fallback);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn locked<'a, L: FnOnce(LockedQueue<'a, T, S, SP>)>(&'a self, locked_fallback: L) {
+        locked_fallback(self.lock());
+    }
+
+    #[inline]
     pub fn fetch_update_state_or_lock<F: FnMut(S) -> S>(
         &self,
         mut f: F,
@@ -223,8 +236,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
     pub fn fetch_update_state_with_lock<
         'a,
         F: FnMut(S) -> S,
-        L: FnOnce(LockedQueue<'a, T, S, SP>) -> R,
-        R,
+        L: FnOnce(LockedQueue<'a, T, S, SP>),
     >(
         &'a self,
         mut f: F,
@@ -237,12 +249,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
 
     #[cold]
     #[inline(never)]
-    pub fn fetch_update_state_locked<
-        'a,
-        F: FnMut(S) -> S,
-        L: FnOnce(LockedQueue<'a, T, S, SP>) -> R,
-        R,
-    >(
+    pub fn fetch_update_state_locked<'a, F: FnMut(S) -> S, L: FnOnce(LockedQueue<'a, T, S, SP>)>(
         &'a self,
         mut f: F,
         locked_fallback: L,

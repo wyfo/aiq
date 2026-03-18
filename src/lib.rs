@@ -8,6 +8,8 @@ pub mod queue;
 pub mod sync;
 #[cfg(not(nightly))]
 mod unsafe_pinned;
+pub mod wait_queue;
 
 pub use node::{Node, NodeState};
 pub use queue::Queue;
+pub use wait_queue::WaitQueue;
