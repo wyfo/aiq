@@ -170,10 +170,10 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
     }
 
     #[inline]
-    pub fn try_update_state(&self, current: S, new: S) -> Result<S, Option<S>> {
+    pub fn compare_exchange_state(&self, current: S, new: S) -> Result<S, Option<S>> {
         let cur = StateOrPtr::State(current).into();
         let new = StateOrPtr::State(new).into();
-        match self.tail.compare_exchange_weak(cur, new, SeqCst, Acquire) {
+        match self.tail.compare_exchange(cur, new, SeqCst, Acquire) {
             Ok(_) => Ok(current),
             Err(ptr) => Err(StateOrPtr::from(ptr).state()),
         }
