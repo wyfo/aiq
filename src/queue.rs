@@ -420,6 +420,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
         wait_enqueued: bool,
         prev: *mut NodeLink,
     ) -> bool {
+        let mut is_empty = false;
         let is_head = prev == HEAD_MARKER;
         let prev_next = if is_head {
             &self.head
@@ -437,8 +438,9 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
                 new_tail = StateOrPtr::Ptr(unsafe { NonNull::new_unchecked(prev) }).into();
             }
             let node_ptr = StateOrPtr::Ptr(NonNull::from(node)).into();
-            if ((self.tail).compare_exchange(node_ptr, new_tail, SeqCst, Relaxed)).is_err() {
-                next = Some(self.get_next(&node.next));
+            match (self.tail).compare_exchange(node_ptr, new_tail, SeqCst, Relaxed) {
+                Ok(_) => is_empty = true,
+                Err(_) => next = Some(self.get_next(&node.next)),
             }
         }
         if let Some(next) = next {
@@ -446,7 +448,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
             prev_next.store(next.as_ptr(), Relaxed);
         }
         node.prev.store(RawNodeState::Dequeued.into_ptr(), Release);
-        is_head
+        is_empty
     }
 }
 
