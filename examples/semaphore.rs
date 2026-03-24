@@ -68,6 +68,7 @@ impl Semaphore {
         mut permits: usize,
         mut locked: LockedQueue<'a, Waiter, usize>,
     ) {
+        assert!(!self.is_closed());
         let mut wakers = ArrayVec::<Waker, 32>::new();
         'outer: loop {
             loop {
@@ -78,6 +79,7 @@ impl Semaphore {
                         return true;
                     }
                     permits -= waiter.permits_remaining as usize;
+                    waiter.permits_remaining = 0;
                     wakers.push(waiter.waker.take().unwrap());
                     false
                 });
@@ -272,13 +274,21 @@ impl<'a> Acquire<'a> {
         let this = self.project();
         match this.node.state() {
             NodeState::Unqueued(_) => {}
-            NodeState::Queued(mut waiter) => {
-                let acquired = (*this.permits - waiter.with_data_mut(|w| w.permits_remaining)) as _;
+            NodeState::Queued(waiter) => {
+                let acquired = (*this.permits - waiter.with_data(|w| w.permits_remaining)) as _;
                 if let Err((sem, locked)) = waiter.dequeue_try_set_queue_state(acquired) {
-                    sem.0.add_permits_locked(acquired, locked);
+                    if sem.0.is_closed() {
+                        drop(locked);
+                        sem.0.add_permits(acquired);
+                    } else if acquired > 0 {
+                        sem.0.add_permits_locked(acquired, locked);
+                    }
                 }
             }
-            NodeState::Dequeued(waiter) => waiter.queue().0.add_permits(*this.permits as _),
+            NodeState::Dequeued(waiter) => {
+                let acquired = (*this.permits - waiter.with_data(|w| w.permits_remaining)) as _;
+                waiter.queue().0.add_permits(acquired);
+            }
         }
     }
 }
@@ -289,7 +299,7 @@ impl<'a> Future for Acquire<'a> {
     #[cold]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let res = self.as_mut().poll_acquire(cx);
-        if res.is_ready() {
+        if matches!(res, Poll::Ready(Ok(()))) {
             *self.project().permits = 0;
         }
         res
