@@ -412,7 +412,6 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
         unsafe { self.remove_with_prev(node, new_tail, wait_enqueued, node.prev.load(Relaxed)) }
     }
 
-    #[inline]
     unsafe fn remove_with_prev(
         &mut self,
         node: &NodeLink,

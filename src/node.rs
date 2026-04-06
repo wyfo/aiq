@@ -5,7 +5,10 @@ use core::{hint::unreachable_unchecked, pin::Pin, ptr, ptr::NonNull};
 #[cfg(not(nightly))]
 use crate::unsafe_pinned::UnsafePinned;
 use crate::{
-    loom::sync::atomic::{AtomicPtr, Ordering::*},
+    loom::{
+        AtomicPtrExt,
+        sync::atomic::{AtomicPtr, Ordering::*},
+    },
     queue::{QueueRef, StateOrPtr},
 };
 
@@ -170,6 +173,7 @@ unsafe impl<Q: QueueRef<NodeData: Sync> + Sync> Sync for NodeUnqueued<'_, Q> {}
 node_getters!(NodeUnqueued<'a, Q: QueueRef>, Q::NodeData);
 
 impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
+    #[inline]
     pub fn queue(&self) -> &'a Q {
         self.queue
     }
@@ -215,16 +219,19 @@ unsafe impl<'a, Q: QueueRef<NodeData: Sync> + Sync> Sync for NodeQueued<'a, Q> w
 node_getters!(NodeQueued<'a, Q: QueueRef>, Q::NodeData);
 
 impl<'a, Q: QueueRef> NodeQueued<'a, Q> {
+    #[inline]
     pub fn queue(&self) -> &'a Q {
         self.queue
     }
 
+    #[inline]
     pub fn dequeue(mut self) -> (&'a Q, LockedQueue<'a, Q>) {
         let node = unsafe { self.node.cast().as_ref() };
         unsafe { self.locked.remove(node, ptr::null_mut(), false) };
         (self.queue, self.locked)
     }
 
+    #[inline]
     #[allow(clippy::type_complexity)]
     pub fn dequeue_try_set_queue_state(
         mut self,
@@ -250,8 +257,20 @@ unsafe impl<Q: QueueRef<NodeData: Sync> + Sync> Sync for NodeDequeued<'_, Q> {}
 node_getters!(NodeDequeued<'a, Q: QueueRef>, Q::NodeData);
 
 impl<'a, Q: QueueRef> NodeDequeued<'a, Q> {
+    #[inline]
     pub fn queue(&self) -> &'a Q {
         self.queue
+    }
+
+    #[inline]
+    pub fn reset(self) -> NodeUnqueued<'a, Q> {
+        let node = unsafe { self.node.cast::<NodeLink>().as_mut() };
+        node.prev.store_mut(ptr::null_mut());
+        node.next.store_mut(ptr::null_mut());
+        NodeUnqueued {
+            queue: self.queue,
+            node: self.node,
+        }
     }
 }
 

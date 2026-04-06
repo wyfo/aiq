@@ -82,20 +82,28 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     }
 
     #[inline]
-    pub fn wait(&self) -> Wait<'_, SP> {
-        Wait(Node::new(WaitQueueRef {
+    pub fn wait_until<P: FnMut() -> Option<T>, T>(
+        &self,
+        predicate: P,
+    ) -> WaitUntil<&Self, SP, P, T> {
+        let node = Node::new(WaitQueueRef {
             wait_queue: self,
             _sync_primitives: PhantomData,
-        }))
+        });
+        WaitUntil { node, predicate }
     }
 
     #[cfg(feature = "alloc")]
     #[inline]
-    pub fn wait_owned(self: Arc<Self>) -> OwnedWait<SP> {
-        OwnedWait(Node::new(WaitQueueRef {
+    pub fn wait_until_owned<P: FnMut() -> Option<T>, T>(
+        self: Arc<Self>,
+        predicate: P,
+    ) -> WaitUntil<Arc<Self>, SP, P, T> {
+        let node = Node::new(WaitQueueRef {
             wait_queue: self,
             _sync_primitives: PhantomData,
-        }))
+        });
+        WaitUntil { node, predicate }
     }
 }
 
@@ -106,49 +114,60 @@ struct WaitQueueRef<Q, SP: SyncPrimitives> {
 
 queue_ref!(WaitQueueRef<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>, NodeData = Option<Waker>, SyncPrimitives = SP, &self.wait_queue.queue);
 
-fn poll_wait<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>(
-    node: Pin<&mut Node<WaitQueueRef<Q, SP>>>,
-    cx: &mut Context<'_>,
-) -> Poll<()> {
-    match node.state() {
-        NodeState::Unqueued(mut waiter) => {
-            waiter.with_data_mut(|mut waiter| {
-                waiter.get_or_insert_with(|| cx.waker().clone());
-            });
-            waiter.enqueue();
-            Poll::Pending
-        }
-        NodeState::Queued(mut waiter) => {
-            waiter.with_data_mut(|mut waiter| {
-                if (*waiter).as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
+pub struct WaitUntil<
+    Q: Deref<Target = WaitQueue<SP>>,
+    SP: SyncPrimitives,
+    P: FnMut() -> Option<T>,
+    T,
+> {
+    node: Node<WaitQueueRef<Q, SP>>,
+    predicate: P,
+}
+
+impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnMut() -> Option<T>, T>
+    WaitUntil<Q, SP, P, T>
+{
+    #[cold]
+    unsafe fn poll_cold(&mut self, cx: &mut Context<'_>) -> Poll<T> {
+        match unsafe { Pin::new_unchecked(&mut self.node) }.state() {
+            NodeState::Unqueued(mut waiter) => {
+                waiter.with_data_mut(|mut waiter| {
                     *waiter = Some(cx.waker().clone());
-                }
-            });
-            Poll::Pending
+                });
+                waiter.enqueue();
+            }
+            NodeState::Queued(mut waiter) => {
+                waiter.with_data_mut(|mut waiter| {
+                    if (*waiter).as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
+                        *waiter = Some(cx.waker().clone());
+                    }
+                });
+            }
+            NodeState::Dequeued(mut waiter) => {
+                waiter.with_data_mut(|mut waiter| {
+                    *waiter = Some(cx.waker().clone());
+                });
+                waiter.reset().enqueue();
+            }
         }
-        NodeState::Dequeued(_) => Poll::Ready(()),
+        match (self.predicate)() {
+            Some(res) => Poll::Ready(res),
+            None => Poll::Pending,
+        }
     }
 }
 
-pub struct Wait<'a, SP: SyncPrimitives>(Node<WaitQueueRef<&'a WaitQueue<SP>, SP>>);
-
-impl<SP: SyncPrimitives> Future for Wait<'_, SP> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        poll_wait(unsafe { self.map_unchecked_mut(|this| &mut this.0) }, cx)
-    }
-}
-
-#[cfg(feature = "alloc")]
-pub struct OwnedWait<SP: SyncPrimitives>(Node<WaitQueueRef<Arc<WaitQueue<SP>>, SP>>);
-
-#[cfg(feature = "alloc")]
-impl<SP: SyncPrimitives> Future for OwnedWait<SP> {
-    type Output = ();
+impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnMut() -> Option<T>, T> Future
+    for WaitUntil<Q, SP, P, T>
+{
+    type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        poll_wait(unsafe { self.map_unchecked_mut(|this| &mut this.0) }, cx)
+        let this = unsafe { self.get_unchecked_mut() };
+        match (this.predicate)() {
+            Some(res) => Poll::Ready(res),
+            None => unsafe { this.poll_cold(cx) },
+        }
     }
 }
 
