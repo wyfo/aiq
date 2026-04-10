@@ -82,15 +82,34 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     }
 
     #[inline]
+    pub fn wait_if<P: FnOnce() -> bool>(&self, predicate: P) -> WaitIf<&Self, SP, P> {
+        WaitIf {
+            node: WaitQueueRef::node(self),
+            predicate: Some(predicate),
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub fn wait_if_owned<P: FnOnce() -> bool>(
+        self: Arc<Self>,
+        predicate: P,
+    ) -> WaitIf<Arc<Self>, SP, P> {
+        WaitIf {
+            node: WaitQueueRef::node(self),
+            predicate: Some(predicate),
+        }
+    }
+
+    #[inline]
     pub fn wait_until<P: FnMut() -> Option<T>, T>(
         &self,
         predicate: P,
     ) -> WaitUntil<&Self, SP, P, T> {
-        let node = Node::new(WaitQueueRef {
-            wait_queue: self,
-            _sync_primitives: PhantomData,
-        });
-        WaitUntil { node, predicate }
+        WaitUntil {
+            node: WaitQueueRef::node(self),
+            predicate,
+        }
     }
 
     #[cfg(feature = "alloc")]
@@ -99,20 +118,69 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
         self: Arc<Self>,
         predicate: P,
     ) -> WaitUntil<Arc<Self>, SP, P, T> {
-        let node = Node::new(WaitQueueRef {
-            wait_queue: self,
-            _sync_primitives: PhantomData,
-        });
-        WaitUntil { node, predicate }
+        WaitUntil {
+            node: WaitQueueRef::node(self),
+            predicate,
+        }
     }
 }
 
-struct WaitQueueRef<Q, SP: SyncPrimitives> {
+struct WaitQueueRef<Q, SP> {
     wait_queue: Q,
     _sync_primitives: PhantomData<SP>,
 }
 
+unsafe impl<Q: Send, SP> Send for WaitQueueRef<Q, SP> {}
+unsafe impl<Q: Sync, SP> Sync for WaitQueueRef<Q, SP> {}
+
+impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> WaitQueueRef<Q, SP> {
+    fn node(queue: Q) -> Node<Self> {
+        Node::new(WaitQueueRef {
+            wait_queue: queue,
+            _sync_primitives: PhantomData,
+        })
+    }
+}
+
 queue_ref!(WaitQueueRef<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>, NodeData = Option<Waker>, SyncPrimitives = SP, &self.wait_queue.queue);
+
+pub struct WaitIf<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnOnce() -> bool> {
+    node: Node<WaitQueueRef<Q, SP>>,
+    predicate: Option<P>,
+}
+
+impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnOnce() -> bool> Future
+    for WaitIf<Q, SP, P>
+{
+    type Output = ();
+
+    #[cold]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        match unsafe { Pin::new_unchecked(&mut this.node) }.state() {
+            NodeState::Unqueued(mut waiter) => {
+                waiter.with_data_mut(|mut waiter| {
+                    *waiter = Some(cx.waker().clone());
+                });
+                waiter.enqueue();
+                if unsafe { this.predicate.take().unwrap_unchecked() }() {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            }
+            NodeState::Queued(mut waiter) => {
+                waiter.with_data_mut(|mut waiter| {
+                    if (*waiter).as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
+                        *waiter = Some(cx.waker().clone());
+                    }
+                });
+                Poll::Pending
+            }
+            NodeState::Dequeued(_) => Poll::Ready(()),
+        }
+    }
+}
 
 pub struct WaitUntil<
     Q: Deref<Target = WaitQueue<SP>>,
