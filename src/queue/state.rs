@@ -22,7 +22,7 @@ pub(crate) enum StateOrPtr<State> {
 
 impl<State: QueueState> StateOrPtr<State> {
     #[inline(always)]
-    pub(super) fn state(self) -> Option<State> {
+    pub(crate) fn state(self) -> Option<State> {
         match self {
             Self::State(state) => Some(state),
             _ => None,
@@ -30,7 +30,7 @@ impl<State: QueueState> StateOrPtr<State> {
     }
 
     #[inline(always)]
-    pub(super) fn tail(self) -> Option<NonNull<NodeLink>> {
+    pub(crate) fn tail(self) -> Option<NonNull<NodeLink>> {
         match self {
             Self::Ptr(tail) => Some(tail),
             _ => None,

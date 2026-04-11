@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+// #![forbid(unsafe_code)]
 #[cfg(not(loom))]
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::{
@@ -48,7 +48,7 @@ impl Notify {
 
     #[inline(always)]
     fn notify_single(&self, notification: Notification) {
-        self.queue.fetch_update_state_with_lock(
+        self.queue.fetch_update_state_or_locked(
             |_| STATE_NOTIFIED,
             |locked| self.wake_single(notification, locked),
         );
@@ -184,7 +184,7 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
                     });
                 }
                 let notify = waiter.queue();
-                match waiter.try_enqueue_with_queue_state(state) {
+                match waiter.try_enqueue_with_queue_state(|s| s == state) {
                     #[cfg(not(loom))]
                     Ok(_) if notify.0.generation.load(SeqCst) != *this.generation => {
                         break Poll::Ready(true);

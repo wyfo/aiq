@@ -14,12 +14,21 @@ use core::{
 };
 
 use crate::{
-    Node, NodeState, Queue, queue_ref,
+    Node, NodeState, Queue,
+    queue::LockedQueue,
+    queue_ref,
     sync::{DefaultSyncPrimitives, SyncPrimitives},
 };
 
+const EMPTY: usize = 0;
+const CLOSED: usize = 1;
+
+fn not_closed(state: Option<usize>) -> bool {
+    state.is_none_or(|s| s == EMPTY)
+}
+
 pub struct WaitQueue<SP: SyncPrimitives = DefaultSyncPrimitives> {
-    queue: Queue<Option<Waker>, (), SP>,
+    queue: Queue<Option<Waker>, usize, SP>,
 }
 
 impl<SP: SyncPrimitives> Default for WaitQueue<SP> {
@@ -37,12 +46,22 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
         }
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.queue.state().is_some_and(|s| s != EMPTY)
+    }
+
+    pub fn close(&self) {
+        if let Some(locked) = self.queue.fetch_update_state_or_lock(|_| CLOSED) {
+            drain_queue::<CLOSED, SP>(locked);
+        }
+    }
+
     #[inline]
     pub fn notify_one(&self) {
-        self.queue.with_lock(|mut locked| {
-            let waker = locked
-                .dequeue()
-                .and_then(|mut w| w.with_data_mut(|mut w| w.take()));
+        self.queue.is_empty_or_locked(|mut locked| {
+            let mut waiter = unsafe { locked.dequeue().unwrap_unchecked() };
+            let waker = waiter.with_data_mut(|mut w| w.take());
+            drop(waiter);
             drop(locked);
             if let Some(waker) = waker {
                 waker.wake();
@@ -52,10 +71,10 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
 
     #[inline]
     pub fn notify_last(&self) {
-        self.queue.with_lock(|mut locked| {
-            let waker = locked
-                .pop()
-                .and_then(|mut w| w.with_data_mut(|mut w| w.take()));
+        self.queue.is_empty_or_locked(|mut locked| {
+            let mut waiter = unsafe { locked.pop().unwrap_unchecked() };
+            let waker = waiter.with_data_mut(|mut w| w.take());
+            drop(waiter);
             drop(locked);
             if let Some(waker) = waker {
                 waker.wake();
@@ -65,20 +84,7 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
 
     #[inline]
     pub fn notify_all(&self) {
-        self.queue.with_lock(|locked| {
-            let mut wakers = WakerList::new();
-            locked.drain().for_each(
-                &mut wakers,
-                |wakers, mut waker| {
-                    if let Some(w) = waker.take() {
-                        wakers.push(w);
-                    }
-                    wakers.is_full()
-                },
-                |wakers| wakers.drain().for_each(Waker::wake),
-            );
-            wakers.drain().for_each(Waker::wake);
-        });
+        self.queue.is_empty_or_locked(drain_queue::<EMPTY, SP>);
     }
 
     #[inline]
@@ -142,7 +148,7 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> WaitQueueRef<Q, SP> {
     }
 }
 
-queue_ref!(WaitQueueRef<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>, NodeData = Option<Waker>, SyncPrimitives = SP, &self.wait_queue.queue);
+queue_ref!(WaitQueueRef<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>, NodeData = Option<Waker>, State = usize, SyncPrimitives = SP, &self.wait_queue.queue);
 
 pub struct WaitIf<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnOnce() -> bool> {
     node: Node<WaitQueueRef<Q, SP>>,
@@ -162,11 +168,12 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnOnce() -> bool> 
                 waiter.with_data_mut(|mut waiter| {
                     *waiter = Some(cx.waker().clone());
                 });
-                waiter.enqueue();
-                if unsafe { this.predicate.take().unwrap_unchecked() }() {
-                    Poll::Pending
-                } else {
-                    Poll::Ready(())
+                match waiter.try_enqueue_with_queue_state(not_closed) {
+                    Ok(_) => Poll::Ready(()),
+                    Err(_) if unsafe { this.predicate.take().unwrap_unchecked() }() => {
+                        Poll::Pending
+                    }
+                    Err(_) => Poll::Ready(()),
                 }
             }
             NodeState::Queued(mut waiter) => {
@@ -197,12 +204,15 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnMut() -> Option<
 {
     #[cold]
     unsafe fn poll_cold(&mut self, cx: &mut Context<'_>) -> Poll<T> {
+        let mut closed = false;
         match unsafe { Pin::new_unchecked(&mut self.node) }.state() {
             NodeState::Unqueued(mut waiter) => {
                 waiter.with_data_mut(|mut waiter| {
                     *waiter = Some(cx.waker().clone());
                 });
-                waiter.enqueue();
+                if waiter.try_enqueue_with_queue_state(not_closed).is_err() {
+                    closed = true;
+                }
             }
             NodeState::Queued(mut waiter) => {
                 waiter.with_data_mut(|mut waiter| {
@@ -215,11 +225,15 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnMut() -> Option<
                 waiter.with_data_mut(|mut waiter| {
                     *waiter = Some(cx.waker().clone());
                 });
-                waiter.reset().enqueue();
+                let waiter = waiter.reset();
+                if waiter.try_enqueue_with_queue_state(not_closed).is_err() {
+                    closed = true;
+                }
             }
         }
         match (self.predicate)() {
             Some(res) => Poll::Ready(res),
+            None if closed => panic!("wait queue is closed but predicate didn't return `Some(_)`"),
             None => Poll::Pending,
         }
     }
@@ -272,4 +286,21 @@ impl Drop for WakerList {
     fn drop(&mut self) {
         self.drain().for_each(drop);
     }
+}
+
+fn drain_queue<const STATE: usize, SP: SyncPrimitives>(
+    locked: LockedQueue<Option<Waker>, usize, SP>,
+) {
+    let mut wakers = WakerList::new();
+    locked.drain_try_set_state(STATE).for_each(
+        &mut wakers,
+        |wakers, mut waker| {
+            if let Some(w) = waker.take() {
+                wakers.push(w);
+            }
+            wakers.is_full()
+        },
+        |wakers| wakers.drain().for_each(Waker::wake),
+    );
+    wakers.drain().for_each(Waker::wake);
 }

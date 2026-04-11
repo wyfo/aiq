@@ -57,7 +57,7 @@ impl Semaphore {
         if permits == 0 {
             return;
         }
-        self.0.fetch_update_state_with_lock(
+        self.0.fetch_update_state_or_locked(
             |state| Self::check_add_permits(state, permits),
             |locked| self.add_permits_locked(permits, locked),
         );
@@ -246,7 +246,7 @@ impl<'a> Acquire<'a> {
                         *this.permits - (state.unwrap_or(0) as u32 >> PERMIT_SHIFT);
                     waiter.waker.get_or_insert_with(|| cx.waker().clone());
                 });
-                match waiter.try_enqueue_with_queue_state(state) {
+                match waiter.try_enqueue_with_queue_state(|s| s == state) {
                     Ok(_) => break Poll::Pending,
                     Err(w) => waiter = w,
                 }

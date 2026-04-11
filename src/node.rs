@@ -184,12 +184,12 @@ impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
     }
 
     #[inline]
-    pub fn try_enqueue_with_queue_state(self, state: Option<Q::State>) -> Result<(), Self> {
-        let same_state = |tail| match StateOrPtr::from(tail) {
-            StateOrPtr::State(s) => state == Some(s),
-            _ => state.is_none(),
-        };
-        if unsafe { self.queue.queue().enqueue(self.node.cast(), same_state) } {
+    pub fn try_enqueue_with_queue_state<S: FnMut(Option<Q::State>) -> bool>(
+        self,
+        mut match_state: S,
+    ) -> Result<(), Self> {
+        let check_tail = |tail| match_state(StateOrPtr::from(tail).state());
+        if unsafe { self.queue.queue().enqueue(self.node.cast(), check_tail) } {
             Ok(())
         } else {
             Err(self)

@@ -1,15 +1,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-use core::{
-    hint,
-    marker::PhantomData,
-    mem,
-    mem::ManuallyDrop,
-    ops::{Deref, Not},
-    ptr,
-    ptr::NonNull,
-};
+use core::{hint, marker::PhantomData, mem, mem::ManuallyDrop, ops::Deref, ptr, ptr::NonNull};
 
 use crate::{
     loom::{
@@ -205,20 +197,28 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
 
     #[inline]
     pub fn is_empty_or_lock(&self) -> Option<LockedQueue<'_, T, S, SP>> {
-        self.is_empty().not().then(|| self.lock())
+        (!self.is_empty())
+            .then(|| self.lock())
+            .filter(|locked| !locked.is_empty())
     }
 
     #[inline]
-    pub fn with_lock<'a, L: FnOnce(LockedQueue<'a, T, S, SP>)>(&'a self, locked_fallback: L) {
+    pub fn is_empty_or_locked<'a, L: FnOnce(LockedQueue<'a, T, S, SP>)>(
+        &'a self,
+        locked_fallback: L,
+    ) {
         if !self.is_empty() {
-            self.locked(locked_fallback);
+            self.is_empty_locked(locked_fallback);
         }
     }
 
     #[cold]
     #[inline(never)]
-    fn locked<'a, L: FnOnce(LockedQueue<'a, T, S, SP>)>(&'a self, locked_fallback: L) {
-        locked_fallback(self.lock());
+    fn is_empty_locked<'a, L: FnOnce(LockedQueue<'a, T, S, SP>)>(&'a self, locked_fallback: L) {
+        let locked = self.lock();
+        if !locked.is_empty() {
+            locked_fallback(locked);
+        }
     }
 
     #[inline]
@@ -233,7 +233,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
     }
 
     #[inline]
-    pub fn fetch_update_state_with_lock<
+    pub fn fetch_update_state_or_locked<
         'a,
         F: FnMut(S) -> S,
         L: FnOnce(LockedQueue<'a, T, S, SP>),
