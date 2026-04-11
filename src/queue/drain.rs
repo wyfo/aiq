@@ -73,10 +73,7 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
         let res = f();
         this.locked = Some(this.queue.lock());
         if this.head() == NonNull::new(sentinel_ptr) {
-            #[cfg(not(loom))]
-            let tail = NonNull::new(*this.sentinel_node.prev.get_mut());
-            #[cfg(loom)]
-            let tail = this.sentinel_node.prev.with_mut(|tail| NonNull::new(*tail));
+            let tail = NonNull::new(this.sentinel_node.prev.load_mut());
             debug_assert_eq!(this.head(), tail);
             this.set_head(ptr::null_mut());
         }

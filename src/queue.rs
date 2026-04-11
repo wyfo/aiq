@@ -92,7 +92,7 @@ const HEAD_MARKER: *mut NodeLink = RawNodeState::Queued.into_ptr();
 pub struct Queue<T, S: QueueState = (), SP: SyncPrimitives = DefaultSyncPrimitives> {
     tail: AtomicPtr<Tail<S>>,
     head: AtomicPtr<NodeLink>,
-    #[cfg(not(any(target_arch = "x86_64", loom)))]
+    #[cfg(not(target_arch = "x86_64"))]
     parked_next: AtomicPtr<AtomicPtr<NodeLink>>,
     mutex: SP::Mutex,
     parker: SP::Parker,
@@ -118,7 +118,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
         Self {
             tail: AtomicPtr::new(tail),
             head: AtomicPtr::new(ptr::null_mut()),
-            #[cfg(not(any(target_arch = "x86_64", loom)))]
+            #[cfg(not(target_arch = "x86_64",))]
             parked_next: AtomicPtr::new(ptr::null_mut()),
             #[cfg(not(loom))]
             mutex: SP::Mutex::INIT,
@@ -139,21 +139,13 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
     }
 
     #[inline(always)]
-    fn load_tail(&self) -> *mut Tail<S> {
-        #[cfg(not(loom))]
-        return self.tail.load(SeqCst);
-        #[cfg(loom)]
-        return (self.tail).compare_and_swap(ptr::null_mut(), ptr::null_mut(), SeqCst);
-    }
-
-    #[inline(always)]
     fn tail(&self) -> Option<NonNull<NodeLink>> {
-        StateOrPtr::from(self.load_tail()).tail()
+        StateOrPtr::from(self.tail.load(SeqCst)).tail()
     }
 
     #[inline]
     pub fn state(&self) -> Option<S> {
-        StateOrPtr::from(self.load_tail()).state()
+        StateOrPtr::from(self.tail.load(SeqCst)).state()
     }
 
     #[inline]
@@ -285,13 +277,13 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
         if SP::Parker::NEVER_BLOCKS {
             unsafe { prev_next.as_ref() }.store(node.as_ptr(), Release);
         } else {
-            #[cfg(not(any(target_arch = "x86_64", loom)))]
+            #[cfg(not(target_arch = "x86_64"))]
             unsafe { prev_next.as_ref() }.store(node.as_ptr(), SeqCst);
-            #[cfg(not(any(target_arch = "x86_64", loom)))]
+            #[cfg(not(target_arch = "x86_64"))]
             if self.parked_next.load(SeqCst) == prev_next.as_ptr() {
                 self.unpark();
             }
-            #[cfg(any(target_arch = "x86_64", loom))]
+            #[cfg(target_arch = "x86_64")]
             if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), Release)).is_null() } {
                 self.unpark();
             }
@@ -357,24 +349,24 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
                 return next;
             }
         }
-        #[cfg(not(any(target_arch = "x86_64", loom)))]
+        #[cfg(not(target_arch = "x86_64"))]
         (self.parked_next).store(ptr::from_ref(next).cast_mut(), SeqCst);
-        #[cfg(any(target_arch = "x86_64", loom))]
+        #[cfg(target_arch = "x86_64")]
         const PARKED: *mut NodeLink = ptr::without_provenance_mut(1);
-        #[cfg(any(target_arch = "x86_64", loom))]
+        #[cfg(target_arch = "x86_64")]
         if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, Acquire) {
             return unsafe { NonNull::new_unchecked(next) };
         }
         loop {
-            #[cfg(not(any(target_arch = "x86_64", loom)))]
+            #[cfg(not(target_arch = "x86_64",))]
             if let Some(next) = NonNull::new(next.load(SeqCst)) {
                 self.parked_next.store(ptr::null_mut(), SeqCst);
                 return next;
             }
             unsafe { self.parker.park() };
-            #[cfg(any(target_arch = "x86_64", loom))]
+            #[cfg(target_arch = "x86_64")]
             let next = next.load(Acquire);
-            #[cfg(any(target_arch = "x86_64", loom))]
+            #[cfg(target_arch = "x86_64")]
             if next != PARKED {
                 return unsafe { NonNull::new_unchecked(next) };
             }
