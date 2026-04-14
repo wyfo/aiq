@@ -10,7 +10,7 @@ use core::{
     mem::MaybeUninit,
     ops::Deref,
     pin::Pin,
-    task::{Context, Poll, Waker},
+    task::{Context, Poll, Waker, ready},
 };
 
 use crate::{
@@ -22,10 +22,6 @@ use crate::{
 
 const EMPTY: usize = 0;
 const CLOSED: usize = 1;
-
-fn not_closed(state: Option<usize>) -> bool {
-    state.is_none_or(|s| s == EMPTY)
-}
 
 pub struct WaitQueue<SP: SyncPrimitives = DefaultSyncPrimitives> {
     queue: Queue<Option<Waker>, usize, SP>,
@@ -88,9 +84,30 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     }
 
     #[inline]
+    pub fn wait(&self) -> Wait<&Self, SP> {
+        Wait {
+            node: Node::new(WaitQueueRef {
+                wait_queue: self,
+                _sync_primitives: PhantomData,
+            }),
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub fn wait_owned(self: Arc<Self>) -> Wait<Arc<Self>, SP> {
+        Wait {
+            node: Node::new(WaitQueueRef {
+                wait_queue: self,
+                _sync_primitives: PhantomData,
+            }),
+        }
+    }
+
+    #[inline]
     pub fn wait_if<P: FnOnce() -> bool>(&self, predicate: P) -> WaitIf<&Self, SP, P> {
         WaitIf {
-            node: WaitQueueRef::node(self),
+            wait: self.wait(),
             predicate: Some(predicate),
         }
     }
@@ -102,7 +119,7 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
         predicate: P,
     ) -> WaitIf<Arc<Self>, SP, P> {
         WaitIf {
-            node: WaitQueueRef::node(self),
+            wait: self.wait_owned(),
             predicate: Some(predicate),
         }
     }
@@ -113,7 +130,7 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
         predicate: P,
     ) -> WaitUntil<&Self, SP, P, T> {
         WaitUntil {
-            node: WaitQueueRef::node(self),
+            wait: self.wait(),
             predicate,
         }
     }
@@ -125,7 +142,7 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
         predicate: P,
     ) -> WaitUntil<Arc<Self>, SP, P, T> {
         WaitUntil {
-            node: WaitQueueRef::node(self),
+            wait: self.wait_owned(),
             predicate,
         }
     }
@@ -139,19 +156,48 @@ struct WaitQueueRef<Q, SP> {
 unsafe impl<Q: Send, SP> Send for WaitQueueRef<Q, SP> {}
 unsafe impl<Q: Sync, SP> Sync for WaitQueueRef<Q, SP> {}
 
-impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> WaitQueueRef<Q, SP> {
-    fn node(queue: Q) -> Node<Self> {
-        Node::new(WaitQueueRef {
-            wait_queue: queue,
-            _sync_primitives: PhantomData,
-        })
+queue_ref!(WaitQueueRef<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>, NodeData = Option<Waker>, State = usize, SyncPrimitives = SP, &self.wait_queue.queue);
+
+pub struct Wait<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> {
+    node: Node<WaitQueueRef<Q, SP>>,
+}
+
+impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Wait<Q, SP> {
+    fn poll_wait(self: Pin<&mut Self>, cx: &mut Context<'_>, requeue: bool) -> Poll<()> {
+        let mut waiter = match unsafe { self.map_unchecked_mut(|this| &mut this.node) }.state() {
+            NodeState::Unqueued(waiter) => waiter,
+            NodeState::Queued(mut waiter) => {
+                waiter.with_data_mut(|mut waiter| {
+                    if (*waiter).as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
+                        *waiter = Some(cx.waker().clone());
+                    }
+                });
+                return Poll::Pending;
+            }
+            NodeState::Dequeued(waiter) if requeue => waiter.reset(),
+            NodeState::Dequeued(_) => return Poll::Ready(()),
+        };
+        waiter.with_data_mut(|mut waiter| {
+            *waiter = Some(cx.waker().clone());
+        });
+        match waiter.try_enqueue_with_queue_state(|s| s.is_none_or(|s| s == EMPTY)) {
+            Ok(_) => Poll::Pending,
+            Err(_) => Poll::Ready(()),
+        }
     }
 }
 
-queue_ref!(WaitQueueRef<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>, NodeData = Option<Waker>, State = usize, SyncPrimitives = SP, &self.wait_queue.queue);
+impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Future for Wait<Q, SP> {
+    type Output = ();
+
+    #[cold]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.poll_wait(cx, false)
+    }
+}
 
 pub struct WaitIf<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnOnce() -> bool> {
-    node: Node<WaitQueueRef<Q, SP>>,
+    wait: Wait<Q, SP>,
     predicate: Option<P>,
 }
 
@@ -163,29 +209,11 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnOnce() -> bool> 
     #[cold]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
-        match unsafe { Pin::new_unchecked(&mut this.node) }.state() {
-            NodeState::Unqueued(mut waiter) => {
-                waiter.with_data_mut(|mut waiter| {
-                    *waiter = Some(cx.waker().clone());
-                });
-                match waiter.try_enqueue_with_queue_state(not_closed) {
-                    Ok(_) => Poll::Ready(()),
-                    Err(_) if unsafe { this.predicate.take().unwrap_unchecked() }() => {
-                        Poll::Pending
-                    }
-                    Err(_) => Poll::Ready(()),
-                }
-            }
-            NodeState::Queued(mut waiter) => {
-                waiter.with_data_mut(|mut waiter| {
-                    if (*waiter).as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
-                        *waiter = Some(cx.waker().clone());
-                    }
-                });
-                Poll::Pending
-            }
-            NodeState::Dequeued(_) => Poll::Ready(()),
+        ready!(unsafe { Pin::new_unchecked(&mut this.wait) }.poll_wait(cx, false));
+        if this.predicate.take().is_some_and(|p| p()) {
+            return Poll::Ready(());
         }
+        Poll::Pending
     }
 }
 
@@ -195,7 +223,7 @@ pub struct WaitUntil<
     P: FnMut() -> Option<T>,
     T,
 > {
-    node: Node<WaitQueueRef<Q, SP>>,
+    wait: Wait<Q, SP>,
     predicate: P,
 }
 
@@ -204,36 +232,12 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnMut() -> Option<
 {
     #[cold]
     unsafe fn poll_cold(&mut self, cx: &mut Context<'_>) -> Poll<T> {
-        let mut closed = false;
-        match unsafe { Pin::new_unchecked(&mut self.node) }.state() {
-            NodeState::Unqueued(mut waiter) => {
-                waiter.with_data_mut(|mut waiter| {
-                    *waiter = Some(cx.waker().clone());
-                });
-                if waiter.try_enqueue_with_queue_state(not_closed).is_err() {
-                    closed = true;
-                }
-            }
-            NodeState::Queued(mut waiter) => {
-                waiter.with_data_mut(|mut waiter| {
-                    if (*waiter).as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
-                        *waiter = Some(cx.waker().clone());
-                    }
-                });
-            }
-            NodeState::Dequeued(mut waiter) => {
-                waiter.with_data_mut(|mut waiter| {
-                    *waiter = Some(cx.waker().clone());
-                });
-                let waiter = waiter.reset();
-                if waiter.try_enqueue_with_queue_state(not_closed).is_err() {
-                    closed = true;
-                }
-            }
-        }
+        let is_closed = unsafe { Pin::new_unchecked(&mut self.wait) }
+            .poll_wait(cx, true)
+            .is_ready();
         match (self.predicate)() {
             Some(res) => Poll::Ready(res),
-            None if closed => panic!("wait queue is closed but predicate didn't return `Some(_)`"),
+            None if is_closed => panic!("wait queue is closed but predicate didn't return `Some`"),
             None => Poll::Pending,
         }
     }

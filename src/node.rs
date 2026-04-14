@@ -118,18 +118,27 @@ impl<Q: QueueRef> Node<Q> {
 
     #[inline(always)]
     pub fn state(self: Pin<&mut Self>) -> NodeState<'_, Q> {
-        unsafe { self.get_unchecked_mut().state_impl() }
+        let raw_state = self.raw_state();
+        unsafe { self.state_from_raw(raw_state) }
     }
 
-    #[inline(always)]
-    fn state_impl(&self) -> NodeState<'_, Q> {
-        let node = NonNull::new(self.node.get()).unwrap();
-        let queue = &self.queue;
-        match self.raw_state() {
+    /// # Safety
+    ///
+    /// Raw state must have been obtained from [`raw_state`](Self::raw_state),
+    /// (or been [`Unqueued`](RawNodeState::Unqueued) if the node has never been queued).
+    /// Node state must not be changed through [`state`](Self::state) in between.
+    pub unsafe fn state_from_raw(
+        self: Pin<&mut Self>,
+        raw_state: RawNodeState,
+    ) -> NodeState<'_, Q> {
+        let this = unsafe { self.get_unchecked_mut() };
+        let node = NonNull::new(this.node.get()).unwrap();
+        let queue = &this.queue;
+        match raw_state {
             RawNodeState::Unqueued => NodeState::Unqueued(NodeUnqueued { node, queue }),
             RawNodeState::Queued => {
-                let locked = self.queue.queue().lock();
-                match self.raw_state() {
+                let locked = this.queue.queue().lock();
+                match this.raw_state() {
                     RawNodeState::Unqueued => unsafe { unreachable_unchecked() },
                     RawNodeState::Queued => NodeState::Queued(NodeQueued {
                         node,
