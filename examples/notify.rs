@@ -11,7 +11,7 @@ use std::{
 use aiq::{Node, NodeState, Queue, queue::LockedQueue, queue_ref};
 use arrayvec::ArrayVec;
 #[cfg(loom)]
-use loom::sync::atomic::{AtomicU64, Ordering::SeqCst};
+use loom::sync::atomic::{AtomicU64, Ordering::Acquire, Ordering::SeqCst, fence};
 use pin_project_lite::pin_project;
 
 const STATE_UNNOTIFIED: usize = 0;
@@ -97,7 +97,11 @@ impl Notify {
 
     pub fn notify_waiters(&self) {
         let locked = self.queue.lock();
+        #[cfg(loom)]
+        fence(SeqCst);
         self.generation.fetch_add(1, SeqCst);
+        #[cfg(loom)]
+        fence(SeqCst);
         let mut wakers = ArrayVec::<Waker, 32>::new();
         locked.drain_try_set_state(STATE_UNNOTIFIED).for_each(
             &mut wakers,
@@ -115,6 +119,8 @@ impl Notify {
 
     #[inline]
     pub fn notified(&self) -> Notified<'_> {
+        #[cfg(loom)]
+        fence(SeqCst);
         Notified {
             inner: NotifiedInner {
                 node: Node::new(NotifyRef(self)),
@@ -126,6 +132,8 @@ impl Notify {
 
     #[inline]
     pub fn notified_owned(self: Arc<Self>) -> OwnedNotified {
+        #[cfg(loom)]
+        fence(SeqCst);
         OwnedNotified {
             inner: NotifiedInner {
                 generation: self.generation.load(SeqCst),
@@ -170,6 +178,8 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
         let mut this = self.project();
         match this.node.as_mut().state() {
             NodeState::Unqueued(mut waiter) => loop {
+                #[cfg(loom)]
+                fence(SeqCst);
                 if waiter.queue().0.generation.load(SeqCst) != *this.generation {
                     break Poll::Ready(false);
                 }
@@ -185,34 +195,36 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
                 }
                 let notify = waiter.queue();
                 match waiter.try_enqueue_with_queue_state(|s| s == state) {
-                    #[cfg(not(loom))]
-                    Ok(_) if notify.0.generation.load(SeqCst) != *this.generation => {
-                        break Poll::Ready(true);
+                    Ok(_) => {
+                        #[cfg(loom)]
+                        fence(SeqCst);
+                        break if notify.0.generation.load(SeqCst) != *this.generation {
+                            Poll::Ready(true)
+                        } else {
+                            Poll::Pending
+                        };
                     }
-                    #[cfg(loom)]
-                    Ok(_) if notify.0.generation.fetch_add(0, SeqCst) != *this.generation => {
-                        break Poll::Ready(true);
-                    }
-                    Ok(_) => break Poll::Pending,
                     Err(w) => waiter = w,
                 }
             },
-            NodeState::Queued(waiter)
-                if waiter.queue().0.generation.load(SeqCst) != *this.generation =>
-            {
-                waiter.dequeue_try_set_queue_state(STATE_UNNOTIFIED).ok();
-                Poll::Ready(false)
-            }
             NodeState::Queued(mut waiter) => {
-                if let Some(cx) = cx {
-                    waiter.with_data_mut(|mut waiter| {
-                        if (waiter.waker.as_ref()).is_none_or(|waker| !waker.will_wake(cx.waker()))
-                        {
-                            waiter.waker = Some(cx.waker().clone());
-                        }
-                    });
+                #[cfg(loom)]
+                fence(SeqCst);
+                if waiter.queue().0.generation.load(SeqCst) != *this.generation {
+                    waiter.dequeue_try_set_queue_state(STATE_UNNOTIFIED).ok();
+                    Poll::Ready(false)
+                } else {
+                    if let Some(cx) = cx {
+                        waiter.with_data_mut(|mut waiter| {
+                            if (waiter.waker.as_ref())
+                                .is_none_or(|waker| !waker.will_wake(cx.waker()))
+                            {
+                                waiter.waker = Some(cx.waker().clone());
+                            }
+                        });
+                    }
+                    Poll::Pending
                 }
-                Poll::Pending
             }
             NodeState::Dequeued(_) => Poll::Ready(false),
         }
