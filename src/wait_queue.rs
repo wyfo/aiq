@@ -10,7 +10,7 @@ use core::{
     mem::MaybeUninit,
     ops::Deref,
     pin::Pin,
-    task::{Context, Poll, Waker, ready},
+    task::{Context, Poll, Waker},
 };
 
 use crate::{
@@ -209,11 +209,10 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnOnce() -> bool> 
     #[cold]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
-        ready!(unsafe { Pin::new_unchecked(&mut this.wait) }.poll_wait(cx, false));
-        if this.predicate.take().is_some_and(|p| p()) {
-            return Poll::Ready(());
+        match unsafe { Pin::new_unchecked(&mut this.wait) }.poll_wait(cx, false) {
+            Poll::Pending if this.predicate.take().is_some_and(|p| !p()) => Poll::Ready(()),
+            poll => poll,
         }
-        Poll::Pending
     }
 }
 
