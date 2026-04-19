@@ -10,7 +10,9 @@ pub trait QueueState: QueueStatePrivate {}
 /// # Safety
 ///
 /// Implementation must be bijective.
-pub(super) unsafe trait QueueStatePrivate: Sized + Copy + PartialEq {
+pub(super) unsafe trait QueueStatePrivate:
+    Sized + Copy + PartialEq + 'static
+{
     fn tail_to_enum(tail: *mut Tail<Self>) -> StateOrPtr<Self>;
     fn enum_to_tail(state_or_ptr: StateOrPtr<Self>) -> *mut Tail<Self>;
 }

@@ -15,7 +15,7 @@ mod spin;
 #[cfg(feature = "std")]
 mod std;
 
-pub trait SyncPrimitives {
+pub trait SyncPrimitives: 'static {
     type Mutex: Mutex;
     type Parker: Parker;
     const SPIN_BEFORE_PARK: usize;
