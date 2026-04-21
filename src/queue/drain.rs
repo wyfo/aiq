@@ -1,9 +1,4 @@
-use core::{
-    hint::unreachable_unchecked,
-    pin::{Pin, pin},
-    ptr,
-    ptr::NonNull,
-};
+use core::{hint::unreachable_unchecked, pin::Pin, ptr, ptr::NonNull};
 
 use crate::{
     Queue,
@@ -55,6 +50,10 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
         self.sentinel_node.next.store_mut(head);
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.sentinel_node.next.load(Relaxed).is_null()
+    }
+
     #[inline]
     pub fn next(self: Pin<&mut Self>) -> Option<NodeDrained<'a, '_, T, S, SP>> {
         let this = unsafe { self.get_unchecked_mut() };
@@ -81,21 +80,26 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
     }
 
     pub fn for_each<H, N: FnMut(&mut H, Pin<&mut T>) -> bool, U: FnMut(&mut H)>(
-        self,
+        mut self,
         helper: &mut H,
         mut on_next: N,
         mut on_unlock: U,
     ) {
-        let mut this = pin!(self);
+        let mut this = unsafe { Pin::new_unchecked(&mut self) };
         loop {
             let Some(mut node) = this.as_mut().next() else {
                 break;
             };
             if node.with_data_mut(|data| on_next(helper, data)) {
                 drop(node);
+                if unsafe { this.as_mut().get_unchecked_mut().head().is_none() } {
+                    break;
+                }
                 this.as_mut().execute_unlocked(|| on_unlock(helper));
             }
         }
+        drop(self);
+        on_unlock(helper);
     }
 
     #[cold]

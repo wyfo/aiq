@@ -114,7 +114,6 @@ impl Notify {
             },
             |wakers| wakers.drain(..).for_each(Waker::wake),
         );
-        wakers.into_iter().for_each(Waker::wake);
     }
 
     #[inline]

@@ -305,5 +305,4 @@ fn drain_queue<const STATE: usize, SP: SyncPrimitives>(
         },
         |wakers| wakers.drain().for_each(Waker::wake),
     );
-    wakers.drain().for_each(Waker::wake);
 }
