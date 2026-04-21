@@ -56,12 +56,10 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     pub fn notify_one(&self) {
         self.queue.is_empty_or_locked(|mut locked| {
             let mut waiter = unsafe { locked.dequeue().unwrap_unchecked() };
-            let waker = waiter.with_data_mut(|mut w| w.take());
+            let waker = waiter.with_data_mut(|mut w| unsafe { w.take().unwrap_unchecked() });
             drop(waiter);
             drop(locked);
-            if let Some(waker) = waker {
-                waker.wake();
-            }
+            waker.wake();
         });
     }
 
@@ -69,13 +67,23 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     pub fn notify_last(&self) {
         self.queue.is_empty_or_locked(|mut locked| {
             let mut waiter = unsafe { locked.pop().unwrap_unchecked() };
-            let waker = waiter.with_data_mut(|mut w| w.take());
+            let waker = waiter.with_data_mut(|mut w| unsafe { w.take().unwrap_unchecked() });
             drop(waiter);
             drop(locked);
-            if let Some(waker) = waker {
-                waker.wake();
-            }
+            waker.wake();
         });
+    }
+
+    #[inline]
+    pub fn notify_many(&self, count: usize) {
+        self.queue
+            .is_empty_or_locked(|locked| notify_many(locked, count));
+    }
+
+    #[inline]
+    pub fn notify_many_const<const COUNT: usize>(&self) {
+        self.queue
+            .is_empty_or_locked(|locked| notify_many(locked, COUNT));
     }
 
     #[inline]
@@ -291,6 +299,30 @@ impl Drop for WakerList {
     }
 }
 
+fn notify_many<SP: SyncPrimitives>(
+    mut locked: LockedQueue<Option<Waker>, usize, SP>,
+    count: usize,
+) {
+    let mut wakers = WakerList::new();
+    for _ in 0..count {
+        let Some(mut waiter) = locked.dequeue() else {
+            drop(locked);
+            break;
+        };
+        wakers.push(waiter.with_data_mut(|mut w| unsafe { w.take().unwrap_unchecked() }));
+        drop(waiter);
+        if wakers.is_full() {
+            let queue = locked.unlock();
+            wakers.drain().for_each(Waker::wake);
+            match queue.is_empty_or_lock() {
+                Some(l) => locked = l,
+                None => break,
+            };
+        }
+    }
+    wakers.drain().for_each(Waker::wake);
+}
+
 fn drain_queue<const STATE: usize, SP: SyncPrimitives>(
     locked: LockedQueue<Option<Waker>, usize, SP>,
 ) {
@@ -298,11 +330,14 @@ fn drain_queue<const STATE: usize, SP: SyncPrimitives>(
     locked.drain_try_set_state(STATE).for_each(
         &mut wakers,
         |wakers, mut waker| {
-            if let Some(w) = waker.take() {
-                wakers.push(w);
-            }
+            wakers.push(unsafe { waker.take().unwrap_unchecked() });
             wakers.is_full()
         },
         |wakers| wakers.drain().for_each(Waker::wake),
     );
+}
+
+#[unsafe(no_mangle)]
+fn plop(q: &WaitQueue) {
+    q.notify_many_const::<32>();
 }

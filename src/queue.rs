@@ -395,6 +395,10 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
         Drain::new(self, StateOrPtr::State(state).into())
     }
 
+    pub fn unlock(self) -> &'a Queue<T, S, SP> {
+        self.queue
+    }
+
     pub(crate) unsafe fn remove(
         &mut self,
         node: &NodeLink,
