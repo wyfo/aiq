@@ -41,7 +41,7 @@ impl Notify {
     #[inline]
     pub const fn new() -> Self {
         Self {
-            queue: Queue::with_state(STATE_UNNOTIFIED),
+            queue: Queue::with_state_const(STATE_UNNOTIFIED),
             generation: AtomicU64::new(0),
         }
     }

@@ -38,7 +38,7 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     #[inline]
     pub const fn new() -> Self {
         Self {
-            queue: Queue::new(),
+            queue: Queue::with_state_const(EMPTY),
         }
     }
 

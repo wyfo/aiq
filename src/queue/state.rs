@@ -10,9 +10,7 @@ pub trait QueueState: QueueStatePrivate {}
 /// # Safety
 ///
 /// Implementation must be bijective.
-pub(super) unsafe trait QueueStatePrivate:
-    Sized + Copy + PartialEq + 'static
-{
+pub(super) unsafe trait QueueStatePrivate: Sized + Copy + PartialEq {
     fn tail_to_enum(tail: *mut Tail<Self>) -> StateOrPtr<Self>;
     fn enum_to_tail(state_or_ptr: StateOrPtr<Self>) -> *mut Tail<Self>;
 }
@@ -68,7 +66,7 @@ pub(super) const fn state_to_ptr(state: usize) -> *mut Tail<usize> {
     const fn panic_queue_state_overflow() -> ! {
         panic!("queue state overflow")
     }
-    if state > usize::MAX >> STATE_SHIFT {
+    if state > INTRUSIVE_QUEUE_MAX_STATE {
         panic_queue_state_overflow()
     }
     ptr::without_provenance_mut(state << STATE_SHIFT)
@@ -93,6 +91,31 @@ unsafe impl QueueStatePrivate for usize {
     }
 }
 impl QueueState for usize {}
+
+pub(crate) fn check_alignment<T>(ptr: *mut T) -> *mut Tail<*mut T> {
+    const { assert!(align_of::<T>() > 1) };
+    ptr.map_addr(|addr| addr & !TAIL_FLAG).cast()
+}
+
+unsafe impl<T> QueueStatePrivate for *mut T {
+    #[inline(always)]
+    fn tail_to_enum(tail: *mut Tail<Self>) -> StateOrPtr<Self> {
+        if tail.addr() & TAIL_FLAG != 0 {
+            let ptr = tail.map_addr(|addr| addr & !TAIL_FLAG).cast();
+            StateOrPtr::Ptr(unsafe { NonNull::new_unchecked(ptr) })
+        } else {
+            StateOrPtr::State(tail.cast())
+        }
+    }
+    #[inline(always)]
+    fn enum_to_tail(state_or_ptr: StateOrPtr<Self>) -> *mut Tail<Self> {
+        match state_or_ptr {
+            StateOrPtr::State(state) => check_alignment(state),
+            StateOrPtr::Ptr(ptr) => ptr.as_ptr().map_addr(|addr| addr | TAIL_FLAG).cast(),
+        }
+    }
+}
+impl<T> QueueState for *mut T {}
 
 impl<S: QueueState> From<*mut Tail<S>> for StateOrPtr<S> {
     #[inline(always)]

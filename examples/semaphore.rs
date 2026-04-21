@@ -44,7 +44,7 @@ impl Semaphore {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new(permits: usize) -> Self {
-        Self(Queue::with_state(Self::check_add_permits(0, permits)))
+        Self(Queue::with_state_const(Self::check_add_permits(0, permits)))
     }
 
     #[inline]

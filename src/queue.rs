@@ -138,6 +138,11 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
         Self::new_impl(ptr::null_mut())
     }
 
+    #[inline]
+    pub fn with_state(state: S) -> Self {
+        Self::new_impl(StateOrPtr::State(state).into())
+    }
+
     #[inline(always)]
     fn tail(&self) -> Option<NonNull<NodeLink>> {
         StateOrPtr::from(self.tail.load(SeqCst)).tail()
@@ -301,7 +306,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
 impl<T, SP: SyncPrimitives> Queue<T, usize, SP> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
-    pub const fn with_state(state: usize) -> Self {
+    pub const fn with_state_const(state: usize) -> Self {
         Self::new_impl(state_to_ptr(state))
     }
 }
