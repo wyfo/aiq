@@ -113,7 +113,7 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     }
 
     #[inline]
-    pub fn wait_if<P: FnOnce() -> bool>(&self, predicate: P) -> WaitIf<&Self, SP, P> {
+    pub fn wait_if<P: FnOnce() -> bool>(&self, predicate: P) -> WaitIf<&Self, P, SP> {
         WaitIf {
             wait: self.wait(),
             predicate: Some(predicate),
@@ -125,7 +125,7 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     pub fn wait_if_owned<P: FnOnce() -> bool>(
         self: Arc<Self>,
         predicate: P,
-    ) -> WaitIf<Arc<Self>, SP, P> {
+    ) -> WaitIf<Arc<Self>, P, SP> {
         WaitIf {
             wait: self.wait_owned(),
             predicate: Some(predicate),
@@ -136,7 +136,7 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     pub fn wait_until<P: FnMut() -> Option<T>, T>(
         &self,
         predicate: P,
-    ) -> WaitUntil<&Self, SP, P, T> {
+    ) -> WaitUntil<&Self, P, T, SP> {
         WaitUntil {
             wait: self.wait(),
             predicate,
@@ -148,7 +148,7 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     pub fn wait_until_owned<P: FnMut() -> Option<T>, T>(
         self: Arc<Self>,
         predicate: P,
-    ) -> WaitUntil<Arc<Self>, SP, P, T> {
+    ) -> WaitUntil<Arc<Self>, P, T, SP> {
         WaitUntil {
             wait: self.wait_owned(),
             predicate,
@@ -166,7 +166,7 @@ unsafe impl<Q: Sync, SP> Sync for WaitQueueRef<Q, SP> {}
 
 queue_ref!(WaitQueueRef<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>, NodeData = Option<Waker>, State = usize, SyncPrimitives = SP, &self.wait_queue.queue);
 
-pub struct Wait<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> {
+pub struct Wait<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives = DefaultSyncPrimitives> {
     node: Node<WaitQueueRef<Q, SP>>,
 }
 
@@ -204,13 +204,17 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Future for Wait<Q, SP
     }
 }
 
-pub struct WaitIf<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnOnce() -> bool> {
+pub struct WaitIf<
+    Q: Deref<Target = WaitQueue<SP>>,
+    P: FnOnce() -> bool,
+    SP: SyncPrimitives = DefaultSyncPrimitives,
+> {
     wait: Wait<Q, SP>,
     predicate: Option<P>,
 }
 
-impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnOnce() -> bool> Future
-    for WaitIf<Q, SP, P>
+impl<Q: Deref<Target = WaitQueue<SP>>, P: FnOnce() -> bool, SP: SyncPrimitives> Future
+    for WaitIf<Q, P, SP>
 {
     type Output = ();
 
@@ -226,16 +230,16 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnOnce() -> bool> 
 
 pub struct WaitUntil<
     Q: Deref<Target = WaitQueue<SP>>,
-    SP: SyncPrimitives,
     P: FnMut() -> Option<T>,
     T,
+    SP: SyncPrimitives = DefaultSyncPrimitives,
 > {
     wait: Wait<Q, SP>,
     predicate: P,
 }
 
-impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnMut() -> Option<T>, T>
-    WaitUntil<Q, SP, P, T>
+impl<Q: Deref<Target = WaitQueue<SP>>, P: FnMut() -> Option<T>, T, SP: SyncPrimitives>
+    WaitUntil<Q, P, T, SP>
 {
     #[cold]
     unsafe fn poll_cold(&mut self, cx: &mut Context<'_>) -> Poll<T> {
@@ -250,8 +254,8 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnMut() -> Option<
     }
 }
 
-impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives, P: FnMut() -> Option<T>, T> Future
-    for WaitUntil<Q, SP, P, T>
+impl<Q: Deref<Target = WaitQueue<SP>>, P: FnMut() -> Option<T>, T, SP: SyncPrimitives> Future
+    for WaitUntil<Q, P, T, SP>
 {
     type Output = T;
 
