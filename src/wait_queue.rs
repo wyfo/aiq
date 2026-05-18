@@ -97,8 +97,12 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
 
     #[inline]
     pub fn notify_many_const<const COUNT: usize>(&self) {
-        self.queue
-            .is_empty_or_locked(|locked| notify_many(locked, COUNT));
+        if COUNT == 1 {
+            self.notify_one();
+        } else {
+            self.queue
+                .is_empty_or_locked(|locked| notify_many(locked, COUNT));
+        }
     }
 
     #[inline]
