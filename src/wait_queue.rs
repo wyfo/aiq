@@ -5,9 +5,9 @@ extern crate alloc;
 use alloc::sync::Arc;
 use core::{
     future::Future,
-    hint::{assert_unchecked, unreachable_unchecked},
+    hint::assert_unchecked,
     marker::PhantomData,
-    mem::{ManuallyDrop, MaybeUninit},
+    mem::MaybeUninit,
     ops::Deref,
     pin::Pin,
     task::{Context, Poll, Waker},
@@ -15,7 +15,6 @@ use core::{
 
 use crate::{
     Node, NodeState, Queue,
-    node::{NodeDequeued, RawNodeState},
     queue::LockedQueue,
     queue_ref,
     sync::{DefaultSyncPrimitives, SyncPrimitives},
@@ -113,10 +112,10 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     #[inline]
     pub fn wait(&self) -> Wait<&Self, SP> {
         Wait {
-            node: ManuallyDrop::new(Node::new(WaitQueueRef {
+            node: Node::new(WaitQueueRef {
                 wait_queue: self,
                 _sync_primitives: PhantomData,
-            })),
+            }),
         }
     }
 
@@ -124,10 +123,10 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     #[inline]
     pub fn wait_owned(self: Arc<Self>) -> Wait<Arc<Self>, SP> {
         Wait {
-            node: ManuallyDrop::new(Node::new(WaitQueueRef {
+            node: Node::new(WaitQueueRef {
                 wait_queue: self,
                 _sync_primitives: PhantomData,
-            })),
+            }),
         }
     }
 
@@ -183,15 +182,19 @@ struct WaitQueueRef<Q, SP> {
 unsafe impl<Q: Send, SP> Send for WaitQueueRef<Q, SP> {}
 unsafe impl<Q: Sync, SP> Sync for WaitQueueRef<Q, SP> {}
 
-queue_ref!(WaitQueueRef<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>, NodeData = Waiter, State = usize, SyncPrimitives = SP, &self.wait_queue.queue);
+queue_ref!(WaitQueueRef<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>, NodeData = Waiter, State = usize, SyncPrimitives = SP, &self.wait_queue.queue, |q: &WaitQueueRef<Q, SP>, w: &mut Waiter| match w.notification {
+    Some(Notification::One) => q.wait_queue.notify_one(),
+    Some(Notification::Last) => q.wait_queue.notify_last(),
+    None => {}
+});
 
 pub struct Wait<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives = DefaultSyncPrimitives> {
-    node: ManuallyDrop<Node<WaitQueueRef<Q, SP>>>,
+    node: Node<WaitQueueRef<Q, SP>>,
 }
 
 impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Wait<Q, SP> {
     fn poll_wait(self: Pin<&mut Self>, cx: &mut Context<'_>, requeue: bool) -> Poll<()> {
-        let mut waiter = match unsafe { self.map_unchecked_mut(|this| &mut *this.node) }.state() {
+        let mut waiter = match unsafe { self.map_unchecked_mut(|this| &mut this.node) }.state() {
             NodeState::Unqueued(waiter) => waiter,
             NodeState::Queued(mut waiter) => {
                 waiter.with_data_mut(|mut waiter| {
@@ -210,47 +213,6 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Wait<Q, SP> {
         match waiter.try_enqueue_with_queue_state(|s| s.is_none_or(|s| s == EMPTY)) {
             Ok(_) => Poll::Pending,
             Err(_) => Poll::Ready(()),
-        }
-    }
-}
-
-impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Drop for Wait<Q, SP> {
-    fn drop(&mut self) {
-        #[inline(always)]
-        fn renotify<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>(
-            waiter: NodeDequeued<WaitQueueRef<Q, SP>>,
-        ) {
-            match waiter.with_data(|w| w.notification) {
-                Some(Notification::One) => waiter.queue().wait_queue.notify_one(),
-                Some(Notification::Last) => waiter.queue().wait_queue.notify_last(),
-                None => {}
-            }
-        }
-        match self.node.raw_state() {
-            RawNodeState::Queued => {
-                #[cold]
-                unsafe fn dequeue<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>(
-                    node: &mut Node<WaitQueueRef<Q, SP>>,
-                ) {
-                    match unsafe { Pin::new_unchecked(node).state_from_raw(RawNodeState::Queued) } {
-                        NodeState::Queued(waiter) => {
-                            waiter.dequeue();
-                        }
-                        NodeState::Dequeued(waiter) => renotify(waiter),
-                        _ => {}
-                    }
-                }
-                unsafe { dequeue(&mut self.node) };
-            }
-            RawNodeState::Dequeued => unsafe {
-                let NodeState::Dequeued(waiter) =
-                    Pin::new_unchecked(&mut *self.node).state_from_raw(RawNodeState::Queued)
-                else {
-                    unreachable_unchecked()
-                };
-                renotify(waiter);
-            },
-            _ => {}
         }
     }
 }

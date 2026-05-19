@@ -32,6 +32,8 @@ pub unsafe trait QueueRef {
     type SyncPrimitives: SyncPrimitives;
 
     fn queue(&self) -> &Queue<Self::NodeData, Self::State, Self::SyncPrimitives>;
+
+    fn drop_node(&self, _data: &mut Self::NodeData) {}
 }
 
 unsafe impl<T, S: QueueState, SP: SyncPrimitives> QueueRef for &Queue<T, S, SP> {
@@ -61,6 +63,7 @@ macro_rules! queue_ref {
         $(State = $state:ty,)?
         $(SyncPrimitives = $sync:ty,)?
         &self $(.$field:tt)+
+        $(,$drop:expr)?
     ) => {
         unsafe impl $(<
             $($lf,)?
@@ -72,6 +75,9 @@ macro_rules! queue_ref {
             fn queue(&self) -> &$crate::Queue<Self::NodeData, Self::State, Self::SyncPrimitives> {
                 &self $(.$field)+
             }
+            $(fn drop_node(&self, data: &mut Self::NodeData) {
+                $drop(self, data)
+            })?
         }
     };
 }
